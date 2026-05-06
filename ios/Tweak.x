@@ -27,6 +27,10 @@
 #import "SWRunRoutePlanner.h"
 #import "SWRunSimulator.h"
 
+@interface NSURLSession (SWRunCheckpointHUD)
+- (void)swrun_processResponseData:(NSData *)data;
+@end
+
 // ============================================================
 #pragma mark - 辅助函数: JSON 解析
 // ============================================================
@@ -66,18 +70,7 @@ static NSArray<NSDictionary *> *ExtractPointsFromJSON(id jsonObject) {
             }
         }
 
-        // 检查 allLocJson (实时轨迹数据，也包含点位信息)
-        NSString *allLocStr = dict[@"allLocJson"];
-        if ([allLocStr isKindOfClass:[NSString class]] && allLocStr.length > 100) {
-            NSData *jsonData = [allLocStr dataUsingEncoding:NSUTF8StringEncoding];
-            if (jsonData) {
-                NSError *err = nil;
-                id innerObj = [NSJSONSerialization JSONObjectWithData:jsonData
-                                                              options:0
-                                                                error:&err];
-                // 这是轨迹数据，不是点位数据，跳过
-            }
-        }
+        // allLocJson 是轨迹数据，不作为点位数组返回
     }
 
     // 方式2: 直接是数组格式 (内嵌 JSON 解析结果)
@@ -599,6 +592,8 @@ static void SWRunDeliverHeadingToDelegates(void) {
         }
     }
 }
+
+void SWRunStopGPSSimulation(void);
 
 /// 启动GPS模拟 — 由浮动窗按钮触发
 void SWRunStartGPSSimulation(void) {
