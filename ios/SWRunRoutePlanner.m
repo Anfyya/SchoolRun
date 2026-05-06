@@ -61,7 +61,7 @@
 /// 预计算的坐标缓存 (CLLocationCoordinate2D 数组)
 @property (nonatomic, strong) NSMutableArray<NSValue *> *coordinates;
 /// 距离矩阵 [n][n]
-@property (nonatomic, assign) double **distMatrix;
+@property (nonatomic, assign) SWRunDistanceMatrix distMatrix;
 /// 点位数量
 @property (nonatomic, assign) NSInteger pointCount;
 
@@ -245,7 +245,7 @@ static BOOL SWRunHasRouteStart(double lat, double lng) {
     NSLog(@"[SWRunHUD] 🔍 正在获取真实步行路径 (共 %ld 个点)...", (long)n);
 
     // 调用真实路径计算器构建距离矩阵
-    [[SWRunRouteRealPath sharedInstance] buildDistanceMatrix:coords completion:^(double **matrix, NSInteger count, SWPathSource overallSource) {
+    [[SWRunRouteRealPath sharedInstance] buildDistanceMatrix:coords completion:^(SWRunDistanceMatrix matrix, NSInteger count, SWPathSource overallSource) {
 
         // 保存矩阵到实例变量
         self.pointCount = count;

@@ -397,7 +397,7 @@
 #pragma mark - 批量构建距离矩阵
 // ============================================================
 - (void)buildDistanceMatrix:(NSArray<NSValue *> *)coordinates
-                 completion:(void(^)(double **matrix, NSInteger count, SWPathSource overallSource))completion {
+                 completion:(void(^)(SWRunDistanceMatrix matrix, NSInteger count, SWPathSource overallSource))completion {
 
     NSInteger n = coordinates.count;
     if (n < 2) {
@@ -406,7 +406,7 @@
     }
 
     // 分配矩阵
-    double **matrix = (double **)malloc(n * sizeof(double *));
+    SWRunDistanceMatrix matrix = (SWRunDistanceMatrix)malloc(n * sizeof(double *));
     for (NSInteger i = 0; i < n; i++) {
         matrix[i] = (double *)calloc(n, sizeof(double));
     }

@@ -23,6 +23,8 @@ typedef NS_ENUM(NSInteger, SWPathSource) {
     SWPathSourceStraightLine = 2 // 直线距离(无地图服务可用)
 };
 
+typedef double * _Nullable * _Nullable SWRunDistanceMatrix;
+
 /// 单段路径结果
 @interface SWPathSegment : NSObject
 
@@ -52,7 +54,7 @@ typedef NS_ENUM(NSInteger, SWPathSource) {
 /// @param coordinates 坐标数组
 /// @param completion 回调，返回 N×N 距离矩阵 (上三角已填充)
 - (void)buildDistanceMatrix:(NSArray<NSValue *> *)coordinates
-                 completion:(void(^)(double **matrix, NSInteger count, SWPathSource overallSource))completion;
+                 completion:(void(^)(SWRunDistanceMatrix matrix, NSInteger count, SWPathSource overallSource))completion;
 
 /// 检查 AMap SDK 是否可用
 - (BOOL)isAMapAvailable;
