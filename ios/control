@@ -1,0 +1,9 @@
+Package: com.yourname.swruncheckpointhud
+Name: SWRunCheckpointHUD
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: 运动世界校园跑悬浮窗插件 - 识别必经点位与普通点位
+Maintainer: dev
+Author: dev
+Section: Tweaks
+Depends: mobilesubstrate (>= 0.9.5000), firmware (>= 15.0)

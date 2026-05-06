@@ -1,0 +1,39 @@
+# === 禁止上传 App 程序 ===
+SWCampus.app/
+*.app/
+*.car
+*.nib
+*.storyboardc
+*.metallib
+*.bundle/
+Frameworks/
+PlugIns/
+
+# Theos build artifacts
+ios/.theos/
+ios/obj/
+ios/packages/
+
+# macOS
+.DS_Store
+*.swp
+*.swo
+*~
+
+# 文档/变更记录
+*.md
+!ios/README.md
+
+# IDE
+.vscode/
+.idea/
+
+# 调试/测试文件
+*.geojson
+*Debug*
+Test.html
+_SWTestWeb.html
+emoji-test.txt
+unicode_to_hanyu_pinyin.txt
+copy_frameworks.sh
+*.podspec

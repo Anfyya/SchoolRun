@@ -1,0 +1,72 @@
+name: Build SWRunCheckpointHUD
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'ios/**'
+      - '.github/workflows/build.yml'
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Tweak (arm64e · iOS 16.5 · rootless)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Theos
+        run: |
+          export THEOS=/opt/theos
+          echo "THEOS=/opt/theos" >> $GITHUB_ENV
+          if [ ! -d "$THEOS" ]; then
+            sudo git clone --recursive https://github.com/theos/theos.git $THEOS
+            sudo chown -R $(whoami) $THEOS
+          fi
+
+      - name: Install iOS 16.5 SDK
+        run: |
+          SDK_DIR=$THEOS/sdks
+          mkdir -p $SDK_DIR
+          if [ ! -f "$SDK_DIR/iPhoneOS16.5.sdk.tar.xz" ]; then
+            # Download patched iOS 16.5 SDK for arm64e
+            curl -L -o /tmp/iPhoneOS16.5.sdk.tar.xz \
+              "https://github.com/theos/sdks/raw/master/iPhoneOS16.5.sdk.tar.xz" 2>/dev/null || \
+            curl -L -o /tmp/iPhoneOS16.5.sdk.tar.xz \
+              "https://github.com/roothide/theos-sdks/raw/master/iPhoneOS16.5.sdk.tar.xz" 2>/dev/null || true
+            if [ -f /tmp/iPhoneOS16.5.sdk.tar.xz ] && [ -s /tmp/iPhoneOS16.5.sdk.tar.xz ]; then
+              cp /tmp/iPhoneOS16.5.sdk.tar.xz $SDK_DIR/
+            else
+              echo "::warning::SDK download failed, trying Xcode SDK"
+              # Fallback: use Xcode's SDK renamed to 16.5
+              XCODE_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+              SDK_MAJOR=$(plutil -extract CFBundleShortVersionString raw "$XCODE_SDK/../SDKSettings.plist" 2>/dev/null || echo "26.0")
+              echo "::notice::Linking Xcode SDK $SDK_MAJOR → 16.5"
+              ln -sf "$XCODE_SDK" "$SDK_DIR/iPhoneOS16.5.sdk" 2>/dev/null || true
+            fi
+          fi
+
+      - name: Build Package
+        working-directory: ios
+        run: |
+          make clean
+          make package FINALPACKAGE=1
+
+      - name: Collect Artifacts
+        run: |
+          mkdir -p output
+          find ios/packages -name "*.deb" -exec cp {} output/ \;
+          echo "Build completed at $(date)" > output/build-info.txt
+          echo "Target: iOS 16.5 · arm64 arm64e · rootless" >> output/build-info.txt
+          echo "Device: iPhone 11 (arm64e) · Dopamine" >> output/build-info.txt
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SWRunCheckpointHUD-deb
+          path: output/
+          retention-days: 30
