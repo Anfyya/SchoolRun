@@ -271,7 +271,57 @@ static NSString *gLastRunningURL = nil;
 
 %hook NSURLSession
 
-// ★ 正确 hook: 拦截 dataTaskWithRequest:completionHandler:
+// ★ %new 必须在引用它的 hook 方法之前定义
+%new
+- (void)swrun_processResponseData:(NSData *)data {
+    if (!data || data.length < 10) return;
+
+    @try {
+        NSError *err = nil;
+        id jsonObj = [NSJSONSerialization JSONObjectWithData:data
+                                                     options:0
+                                                       error:&err];
+        if (err || !jsonObj) return;
+
+        NSArray<NSDictionary *> *pointsArray = ExtractPointsFromJSON(jsonObj);
+        if (!pointsArray || pointsArray.count == 0) return;
+
+        NSLog(@"[SWRunHUD] 🎯 检测到 %lu 个打卡点", (unsigned long)pointsArray.count);
+
+        NSMutableArray<SWRunCheckpoint *> *checkpoints = [NSMutableArray array];
+        for (NSDictionary *pt in pointsArray) {
+            if ([pt isKindOfClass:[NSDictionary class]]) {
+                SWRunCheckpoint *cp = ParseCheckpoint(pt);
+                [checkpoints addObject:cp];
+                NSLog(@"[SWRunHUD]   %@", cp);
+            }
+        }
+
+        double totalDistance = 0;
+        if ([jsonObj isKindOfClass:[NSDictionary class]]) {
+            NSDictionary *dict = (NSDictionary *)jsonObj;
+            NSDictionary *dataDict = dict[@"data"];
+            if ([dataDict isKindOfClass:[NSDictionary class]]) {
+                if (dataDict[@"totalDistance"]) totalDistance = [dataDict[@"totalDistance"] doubleValue];
+            }
+        }
+
+        [[SWRunFloatingView sharedInstance] updateCheckpoints:checkpoints
+                                                totalDistance:totalDistance];
+
+        [[SWRunRoutePlanner sharedInstance]
+            planOptimalRouteAsync:checkpoints
+                       completion:^(SWRunRoutePlan *plan) {
+            NSLog(@"[SWRunHUD] %@", [plan summaryString]);
+            [[SWRunFloatingView sharedInstance] updateRoutePlan:plan];
+        }];
+
+    } @catch (NSException *exception) {
+        NSLog(@"[SWRunHUD] ⚠️ 解析异常: %@", exception.reason);
+    }
+}
+
+// ★ 拦截 dataTaskWithRequest:completionHandler:
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request
                             completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
     NSString *urlStr = request.URL.absoluteString;
@@ -289,65 +339,6 @@ static NSString *gLastRunningURL = nil;
     };
 
     return %orig(request, wrappedHandler);
-}
-
-%new
-- (void)swrun_processResponseData:(NSData *)data {
-    if (!data || data.length < 10) return;
-
-    @try {
-        NSError *err = nil;
-        id jsonObj = [NSJSONSerialization JSONObjectWithData:data
-                                                     options:0
-                                                       error:&err];
-        if (err || !jsonObj) return;
-
-        // 提取打卡点数据
-        NSArray<NSDictionary *> *pointsArray = ExtractPointsFromJSON(jsonObj);
-        if (!pointsArray || pointsArray.count == 0) return;
-
-        // 记录日志
-        NSLog(@"[SWRunHUD] 🎯 检测到 %lu 个打卡点", (unsigned long)pointsArray.count);
-
-        // 解析为模型
-        NSMutableArray<SWRunCheckpoint *> *checkpoints = [NSMutableArray array];
-        for (NSDictionary *pt in pointsArray) {
-            if ([pt isKindOfClass:[NSDictionary class]]) {
-                SWRunCheckpoint *cp = ParseCheckpoint(pt);
-                [checkpoints addObject:cp];
-                NSLog(@"[SWRunHUD]   %@", cp);
-            }
-        }
-
-        // 获取总里程
-        double totalDistance = 0;
-        if ([jsonObj isKindOfClass:[NSDictionary class]]) {
-            NSDictionary *dict = (NSDictionary *)jsonObj;
-            NSDictionary *dataDict = dict[@"data"];
-            if ([dataDict isKindOfClass:[NSDictionary class]]) {
-                // 尝试从不同字段获取距离
-                if (dataDict[@"totalDistance"]) totalDistance = [dataDict[@"totalDistance"] doubleValue];
-            }
-        }
-
-        // 显示悬浮窗（先显示基本点位信息）
-        [[SWRunFloatingView sharedInstance] updateCheckpoints:checkpoints
-                                                totalDistance:totalDistance];
-
-        // ★ 自动路线规划 (异步, 使用真实步行路径避免穿墙过河)
-        [[SWRunRoutePlanner sharedInstance]
-            planOptimalRouteAsync:checkpoints
-                       completion:^(SWRunRoutePlan *plan) {
-            // 输出日志
-            NSLog(@"[SWRunHUD] %@", [plan summaryString]);
-
-            // 更新路线规划到悬浮窗
-            [[SWRunFloatingView sharedInstance] updateRoutePlan:plan];
-        }];
-
-    } @catch (NSException *exception) {
-        NSLog(@"[SWRunHUD] ⚠️ 解析异常: %@", exception.reason);
-    }
 }
 
 %end
