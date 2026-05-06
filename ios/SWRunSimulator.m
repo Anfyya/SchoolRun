@@ -140,9 +140,6 @@ static double const kNominalStepLength    = 0.76; // 用于距离反推步数
             [self.checkpointIndices addObject:@(self.pathPoints.count - 1)];
         } else {
             // 从上一个 checkpoint 到当前 checkpoint 生成中间路径点
-            NSInteger prevCpIdx = [self.visitOrder[i-1] integerValue];
-            SWRunCheckpoint *prevCp = self.checkpoints[prevCpIdx];
-
             CLLocation *startLoc = [self.pathPoints lastObject];
             CLLocation *endLoc   = [self makeLocation:cp.latitude lng:cp.longitude];
 
@@ -484,7 +481,7 @@ static double const kNominalStepLength    = 0.76; // 用于距离反推步数
 #pragma mark - 公开属性
 // ============================================================
 - (void)setWalkingSpeed:(double)speedMetersPerSecond {
-    self.walkingSpeed = MAX(0.5, MIN(speedMetersPerSecond, 5.0));
+    _walkingSpeed = MAX(0.5, MIN(speedMetersPerSecond, 5.0));
 }
 
 - (double)distanceToNextTarget {
