@@ -199,6 +199,13 @@ static BOOL SWRunMethodReturnLooksScalar(Method method) {
     return strchr("BcCiIsSlLqQ", type[0]) != NULL;
 }
 
+static BOOL SWRunClassShouldPatchAntiJailbreakSelectors(Class cls) {
+    const char *imageName = class_getImageName(cls);
+    if (!imageName) return NO;
+
+    return strstr(imageName, "SWCampus.app/") != NULL;
+}
+
 static void SWRunPatchMethodIfExists(Class cls, SEL sel, IMP imp) {
     Method instanceMethod = class_getInstanceMethod(cls, sel);
     if (SWRunMethodReturnLooksScalar(instanceMethod)) {
@@ -215,9 +222,11 @@ static void SWRunPatchAntiJailbreakSelectors(void) {
     int count = objc_getClassList(NULL, 0);
     if (count <= 0) return;
 
-    Class *classes = (Class *)calloc((size_t)count, sizeof(Class));
+    int capacity = count;
+    Class *classes = (Class *)calloc((size_t)capacity, sizeof(Class));
     if (!classes) return;
-    count = objc_getClassList(classes, count);
+    int actualCount = objc_getClassList(classes, capacity);
+    if (actualCount > capacity) actualCount = capacity;
 
     NSArray<NSString *> *boolSelectors = @[
         @"isJailBreak",
@@ -235,8 +244,10 @@ static void SWRunPatchAntiJailbreakSelectors(void) {
         @"JailbrokenStatus"
     ];
 
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < actualCount; i++) {
         Class cls = classes[i];
+        if (!SWRunClassShouldPatchAntiJailbreakSelectors(cls)) continue;
+
         for (NSString *name in boolSelectors) {
             SWRunPatchMethodIfExists(cls, NSSelectorFromString(name), (IMP)SWRunReturnNO);
         }
@@ -1681,8 +1692,7 @@ static BOOL gHUDInitialized = NO;
     NSLog(@"[SWRunHUD] 📋 功能: 实时显示跑步必经点位/普通点位");
     NSLog(@"[SWRunHUD] 🔌 注入方式: Dopamine rootless + libsubstitute");
 
-    SWRunPatchAntiJailbreakSelectors();
-    NSLog(@"[SWRunHUD] 🛡 反越狱检测入口已接管");
+    NSLog(@"[SWRunHUD] 🛡 反越狱检测入口将延迟到 App 激活后接管");
 
     // 注册通知：App 进入前台时重新显示悬浮窗
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
