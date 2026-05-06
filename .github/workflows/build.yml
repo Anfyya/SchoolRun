@@ -50,6 +50,19 @@ jobs:
             fi
           fi
 
+      - name: Install ldid (pseudo-signing tool)
+        run: |
+          if ! command -v ldid &>/dev/null; then
+            brew install ldid 2>/dev/null || {
+              echo "::notice::brew failed, downloading ldid binary"
+              curl -L -o /usr/local/bin/ldid \
+                "https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_macosx_x86_64" 2>/dev/null || \
+              curl -L -o /usr/local/bin/ldid \
+                "https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_macosx_arm64" 2>/dev/null
+              chmod +x /usr/local/bin/ldid
+            }
+          fi
+
       - name: Build Package
         working-directory: ios
         run: |
