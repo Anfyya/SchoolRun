@@ -1,9 +1,9 @@
 # Makefile for SWCampus Checkpoint Floating Window Tweak
-# Target: iOS 16.5 Dopamine (rootless) jailbreak
+# Target: iOS 15+ Dopamine (rootless) jailbreak, build with available Theos SDK
 # Build: make package
 
 ARCHS = arm64 arm64e
-TARGET = iphone:clang:16.5:15.0
+TARGET = iphone:clang:latest:15.0
 
 THEOS_PACKAGE_SCHEME = rootless
 INSTALL_TARGET_PROCESSES = SWCampus
