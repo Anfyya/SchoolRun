@@ -1623,6 +1623,7 @@ static BOOL gHUDInitialized = NO;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                           dispatch_get_main_queue(), ^{
                 gHUDInitialized = YES;
+                [[SWRunFloatingView sharedInstance] showCollapsed];
                 SWRunPatchAntiJailbreakSelectors();
                 NSLog(@"[SWRunHUD] ✅ 悬浮窗系统初始化完成");
                 NSLog(@"[SWRunHUD] 📱 运动世界 校园跑点位监控已激活");
@@ -1662,7 +1663,7 @@ static BOOL gHUDInitialized = NO;
         // 确保悬浮窗可用
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
                       dispatch_get_main_queue(), ^{
-            // 如果之前已有数据，自动弹出
+            [[SWRunFloatingView sharedInstance] showCollapsed];
         });
     }
 }
@@ -1703,15 +1704,9 @@ static BOOL gHUDInitialized = NO;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
                       dispatch_get_main_queue(), ^{
             // 重新激活 overlay window
-            if ([[SWRunFloatingView sharedInstance] respondsToSelector:@selector(overlayWindow)]) {
-                UIWindow *win = [[SWRunFloatingView sharedInstance] valueForKey:@"overlayWindow"];
-                if (win && win.hidden == NO) {
-                    win.hidden = YES;
-                    win.hidden = NO;
-                }
-            }
+            [[SWRunFloatingView sharedInstance] showCollapsed];
             SWRunPatchAntiJailbreakSelectors();
-            NSLog(@"[SWRunHUD] 🔄 App 进入前台, 悬浮窗已就绪");
+            NSLog(@"[SWRunHUD] 🔄 App 进入前台, 悬浮球已显示");
         });
     }];
 

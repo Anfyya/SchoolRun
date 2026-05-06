@@ -319,6 +319,10 @@ static CGFloat const kCornerRadius     = 12.0;
         header.frame = self.containerView.bounds;
         self.closeBtn.frame = CGRectMake(0, 0, 0, 0);
         self.closeBtn.alpha = 0;
+        self.simBtn.hidden = YES;
+        self.simStopBtn.hidden = YES;
+        self.simStatusLabel.hidden = YES;
+        self.routeInfoLabel.hidden = YES;
         self.toggleBtn.frame = self.containerView.bounds;
         self.toggleBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
         self.titleLabel.frame = CGRectZero;
@@ -333,6 +337,9 @@ static CGFloat const kCornerRadius     = 12.0;
 - (void)expandAnimated:(BOOL)animated {
     self.isExpanded = YES;
     self.tableView.hidden = NO;
+    self.closeBtn.alpha = 1.0;
+    self.simBtn.hidden = NO;
+    self.simStopBtn.hidden = !self.isSimRunning;
     [self.closeBtn setTitle:@"✕" forState:UIControlStateNormal];
     [self.closeBtn setTitleColor:[UIColor colorWithRed:0.9 green:0.3 blue:0.3 alpha:1.0] forState:UIControlStateNormal];
     self.closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:16];
@@ -379,6 +386,15 @@ static CGFloat const kCornerRadius     = 12.0;
         // 5秒后自动收起
         [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(autoCollapse) object:nil];
         [self performSelector:@selector(autoCollapse) withObject:nil afterDelay:5.0];
+    });
+}
+
+- (void)showCollapsed {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.overlayWindow.hidden = NO;
+        self.containerView.alpha = 1.0;
+        [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(autoCollapse) object:nil];
+        [self collapseAnimated:NO];
     });
 }
 

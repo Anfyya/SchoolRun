@@ -33,6 +33,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// 显示悬浮窗
 - (void)show;
 
+/// 显示收起态悬浮球
+- (void)showCollapsed;
+
 /// 隐藏悬浮窗
 - (void)hide;
 
