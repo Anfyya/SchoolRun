@@ -187,6 +187,10 @@ static BOOL SWRunReturnNO(id self, SEL _cmd) {
     return NO;
 }
 
+static BOOL SWRunReturnYES(id self, SEL _cmd) {
+    return YES;
+}
+
 static NSInteger SWRunReturnZeroInteger(id self, SEL _cmd) {
     return 0;
 }
@@ -254,6 +258,39 @@ static void SWRunPatchAntiJailbreakSelectors(void) {
         for (NSString *name in integerSelectors) {
             SWRunPatchMethodIfExists(cls, NSSelectorFromString(name), (IMP)SWRunReturnZeroInteger);
         }
+    }
+    free(classes);
+}
+
+static BOOL SWRunClassShouldPatchGPSGateSelectors(Class cls) {
+    const char *className = class_getName(cls);
+    if (!className) return NO;
+
+    return strstr(className, "SWRunPrepareImpl") != NULL ||
+           strstr(className, "SWFreeRunModeService") != NULL ||
+           strstr(className, "SWScoreRunModeService") != NULL ||
+           strstr(className, "SWSportFreeRunViewController") != NULL ||
+           strstr(className, "SWSportScoreRunViewController") != NULL ||
+           strstr(className, "SWOutdoorRunViewController") != NULL ||
+           strstr(className, "SportStyleViewController") != NULL;
+}
+
+static void SWRunPatchGPSGateSelectors(void) {
+    int count = objc_getClassList(NULL, 0);
+    if (count <= 0) return;
+
+    int capacity = count;
+    Class *classes = (Class *)calloc((size_t)capacity, sizeof(Class));
+    if (!classes) return;
+    int actualCount = objc_getClassList(classes, capacity);
+    if (actualCount > capacity) actualCount = capacity;
+
+    for (int i = 0; i < actualCount; i++) {
+        Class cls = classes[i];
+        if (!SWRunClassShouldPatchGPSGateSelectors(cls)) continue;
+
+        SWRunPatchMethodIfExists(cls, NSSelectorFromString(@"isSignalLevelWeak"), (IMP)SWRunReturnNO);
+        SWRunPatchMethodIfExists(cls, NSSelectorFromString(@"isRawGPSSignalGood"), (IMP)SWRunReturnYES);
     }
     free(classes);
 }
@@ -522,6 +559,7 @@ static NSString *gLastRunningURL = nil;
 /// 全局状态
 static BOOL        gSimActive        = NO;
 static CLLocation *gSimLocation      = nil;
+static CLLocation *gPreflightLocation = nil;
 /// 已注册的 CLLocationManager 实例 (弱引用)
 static NSHashTable *gLocationManagers = nil;
 /// 记录每个 manager 的原始 delegate
@@ -548,6 +586,63 @@ static CLLocationSourceInformation *SWRunFakeLocationSourceInfo(void) {
     return nil;
 }
 
+static BOOL SWRunCoordinateLooksUsable(CLLocationCoordinate2D coordinate) {
+    if (!CLLocationCoordinate2DIsValid(coordinate)) return NO;
+    return fabs(coordinate.latitude) > 0.000001 && fabs(coordinate.longitude) > 0.000001;
+}
+
+static CLLocation *SWRunBuildStrongGPSLocation(CLLocation *loc) {
+    if (!loc || !SWRunCoordinateLooksUsable(loc.coordinate)) return nil;
+
+    CLLocationDistance altitude = loc.verticalAccuracy >= 0 ? loc.altitude : 30.0;
+    CLLocationDirection course = loc.course >= 0 ? loc.course : 0.0;
+    CLLocationSpeed speed = loc.speed >= 0 ? loc.speed : 0.8;
+    NSDate *timestamp = loc.timestamp ?: [NSDate date];
+
+    if (@available(iOS 13.4, *)) {
+        return [[CLLocation alloc] initWithCoordinate:loc.coordinate
+                                             altitude:altitude
+                                   horizontalAccuracy:4.0
+                                     verticalAccuracy:3.0
+                                               course:course
+                                       courseAccuracy:3.0
+                                                speed:speed
+                                        speedAccuracy:0.3
+                                            timestamp:timestamp];
+    }
+
+    return [[CLLocation alloc] initWithCoordinate:loc.coordinate
+                                         altitude:altitude
+                               horizontalAccuracy:4.0
+                                 verticalAccuracy:3.0
+                                           course:course
+                                            speed:speed
+                                        timestamp:timestamp];
+}
+
+static void SWRunRememberPreflightLocation(CLLocation *loc) {
+    CLLocation *strongLoc = SWRunBuildStrongGPSLocation(loc);
+    if (strongLoc) {
+        gPreflightLocation = strongLoc;
+    }
+}
+
+static NSArray<CLLocation *> *SWRunBuildStrongGPSLocations(NSArray<CLLocation *> *locations) {
+    if (locations.count == 0) return locations;
+
+    NSMutableArray<CLLocation *> *strongLocations = [NSMutableArray arrayWithCapacity:locations.count];
+    for (CLLocation *loc in locations) {
+        CLLocation *strongLoc = SWRunBuildStrongGPSLocation(loc);
+        if (strongLoc) {
+            [strongLocations addObject:strongLoc];
+            gPreflightLocation = strongLoc;
+        } else if (loc) {
+            [strongLocations addObject:loc];
+        }
+    }
+    return strongLocations.count > 0 ? strongLocations : locations;
+}
+
 static CLHeading *SWRunBuildFakeHeading(void) {
     SWSimulatedMotionData *md = [SWRunSimulator sharedInstance].motionData;
     CLHeading *fakeHeading = [[CLHeading alloc] init];
@@ -567,7 +662,8 @@ static void SWRunDeliverLocationToDelegates(CLLocation *loc) {
     if (!loc) return;
     SWRunEnsureLocationContainers();
 
-    NSArray *locations = @[loc];
+    CLLocation *deliveredLoc = SWRunBuildStrongGPSLocation(loc) ?: loc;
+    NSArray *locations = @[deliveredLoc];
     for (CLLocationManager *mgr in gLocationManagers) {
         id delegate = [gManagerDelegates objectForKey:mgr];
         if (delegate && [delegate respondsToSelector:@selector(locationManager:didUpdateLocations:)]) {
@@ -579,7 +675,7 @@ static void SWRunDeliverLocationToDelegates(CLLocation *loc) {
     for (id mgr in gAMapLocationManagers) {
         id delegate = [gAMapManagerDelegates objectForKey:mgr];
         if (delegate && [delegate respondsToSelector:amapUpdateSel]) {
-            ((void(*)(id, SEL, id, CLLocation *))objc_msgSend)(delegate, amapUpdateSel, mgr, loc);
+            ((void(*)(id, SEL, id, CLLocation *))objc_msgSend)(delegate, amapUpdateSel, mgr, deliveredLoc);
         }
     }
 }
@@ -614,7 +710,7 @@ void SWRunStartGPSSimulation(void) {
         startSimulationWithCheckpoints:[hud valueForKey:@"checkpoints"]
                           visitOrder:plan.optimalOrder
                      onTick:^(CLLocation *loc, NSInteger step) {
-        gSimLocation = loc;
+        gSimLocation = SWRunBuildStrongGPSLocation(loc) ?: loc;
         gSimActive = YES;
 
         // ★ 更新悬浮窗状态标签
@@ -637,14 +733,14 @@ void SWRunStartGPSSimulation(void) {
         });
 
         // 将同一个模拟快照发送给 CoreLocation / AMap delegates
-        SWRunDeliverLocationToDelegates(loc);
+        SWRunDeliverLocationToDelegates(gSimLocation);
         SWRunDeliverHeadingToDelegates();
 
         // 广播通知
         [[NSNotificationCenter defaultCenter]
             postNotificationName:@"SWRunSimulatedLocationUpdate"
                           object:nil
-                        userInfo:@{@"location": loc}];
+                        userInfo:@{@"location": gSimLocation ?: loc}];
     }
     onComplete:^(BOOL finished) {
         gSimActive = NO;
@@ -709,7 +805,10 @@ void SWRunToggleSimulation(void) {
     if (gSimActive && gSimLocation) {
         return gSimLocation;
     }
-    return %orig;
+
+    CLLocation *loc = %orig;
+    SWRunRememberPreflightLocation(loc);
+    return gPreflightLocation ?: loc;
 }
 
 - (void)startUpdatingLocation {
@@ -720,6 +819,13 @@ void SWRunToggleSimulation(void) {
         SWRunDeliverLocationToDelegates(gSimLocation);
     }
     %orig;
+
+    if (!gSimActive && gPreflightLocation) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
+                      dispatch_get_main_queue(), ^{
+            SWRunDeliverLocationToDelegates(gPreflightLocation);
+        });
+    }
 }
 
 - (void)requestLocation {
@@ -727,6 +833,9 @@ void SWRunToggleSimulation(void) {
         // 单次定位请求 → 直接返回模拟位置
         SWRunDeliverLocationToDelegates(gSimLocation);
         return;
+    }
+    if (gPreflightLocation) {
+        SWRunDeliverLocationToDelegates(gPreflightLocation);
     }
     %orig;
 }
@@ -765,12 +874,16 @@ void SWRunToggleSimulation(void) {
 
 - (CLLocationAccuracy)horizontalAccuracy {
     if (gSimActive && gSimLocation && self != gSimLocation) return gSimLocation.horizontalAccuracy;
-    return %orig;
+    CLLocationAccuracy accuracy = %orig;
+    if (accuracy < 0) return accuracy;
+    return MIN(accuracy, 4.0);
 }
 
 - (CLLocationAccuracy)verticalAccuracy {
     if (gSimActive && gSimLocation && self != gSimLocation) return gSimLocation.verticalAccuracy;
-    return %orig;
+    CLLocationAccuracy accuracy = %orig;
+    if (accuracy < 0) return accuracy;
+    return MIN(accuracy, 3.0);
 }
 
 - (CLLocationDirection)course {
@@ -790,17 +903,21 @@ void SWRunToggleSimulation(void) {
 
 - (CLLocationAccuracy)speedAccuracy {
     if (gSimActive && gSimLocation) return 0.3;
-    return %orig;
+    CLLocationAccuracy accuracy = %orig;
+    if (accuracy < 0) return accuracy;
+    return MIN(accuracy, 0.3);
 }
 
 - (CLLocationDirectionAccuracy)courseAccuracy {
     if (gSimActive && gSimLocation) return [SWRunSimulator sharedInstance].motionData.headingAccuracy;
-    return %orig;
+    CLLocationDirectionAccuracy accuracy = %orig;
+    if (accuracy < 0) return accuracy;
+    return MIN(accuracy, 3.0);
 }
 
 - (CLLocationSourceInformation *)sourceInformation {
-    if (gSimActive) return SWRunFakeLocationSourceInfo();
-    return %orig;
+    CLLocationSourceInformation *sourceInfo = %orig;
+    return sourceInfo ?: SWRunFakeLocationSourceInfo();
 }
 
 %end
@@ -808,13 +925,11 @@ void SWRunToggleSimulation(void) {
 %hook CLLocationSourceInformation
 
 - (BOOL)isSimulatedBySoftware {
-    if (gSimActive) return NO;
-    return %orig;
+    return NO;
 }
 
 - (BOOL)isProducedByAccessory {
-    if (gSimActive) return NO;
-    return %orig;
+    return NO;
 }
 
 %end
@@ -1474,6 +1589,20 @@ static CMDeviceMotion *SWRunBuildFakeDeviceMotion(void) {
         });
         return;
     }
+
+    if (completionBlock) {
+        void (^wrappedBlock)(CLLocation *, id, NSError *) = ^(CLLocation *location, id regeocode, NSError *error) {
+            CLLocation *strongLocation = SWRunBuildStrongGPSLocation(location);
+            if (strongLocation) {
+                gPreflightLocation = strongLocation;
+                completionBlock(strongLocation, regeocode, nil);
+            } else {
+                completionBlock(location, regeocode, error);
+            }
+        };
+        %orig(withReGeocode, wrappedBlock);
+        return;
+    }
     %orig;
 }
 
@@ -1505,7 +1634,9 @@ static CMDeviceMotion *SWRunBuildFakeDeviceMotion(void) {
         %orig(manager, @[gSimLocation]);
         return;
     }
-    %orig;
+
+    NSArray<CLLocation *> *strongLocations = SWRunBuildStrongGPSLocations(locations);
+    %orig(manager, strongLocations);
 }
 
 - (void)locationManager:(CLLocationManager *)manager didUpdateHeading:(CLHeading *)newHeading {
@@ -1521,6 +1652,14 @@ static CMDeviceMotion *SWRunBuildFakeDeviceMotion(void) {
            fromLocation:(CLLocation *)oldLocation {
     if (gSimActive && gSimLocation) {
         %orig(manager, gSimLocation, oldLocation ?: gSimLocation);
+        return;
+    }
+
+    CLLocation *strongNewLocation = SWRunBuildStrongGPSLocation(newLocation);
+    CLLocation *strongOldLocation = SWRunBuildStrongGPSLocation(oldLocation);
+    if (strongNewLocation) {
+        gPreflightLocation = strongNewLocation;
+        %orig(manager, strongNewLocation, strongOldLocation ?: oldLocation ?: strongNewLocation);
         return;
     }
     %orig;
@@ -1568,12 +1707,26 @@ monitoringDidFailForRegion:(CLRegion *)region
         %orig(manager, gSimLocation);
         return;
     }
+
+    CLLocation *strongLocation = SWRunBuildStrongGPSLocation(location);
+    if (strongLocation) {
+        gPreflightLocation = strongLocation;
+        %orig(manager, strongLocation);
+        return;
+    }
     %orig;
 }
 
 - (void)amapLocationManager:(id)manager didUpdateLocation:(CLLocation *)location reGeocode:(id)reGeocode {
     if (gSimActive && gSimLocation) {
         %orig(manager, gSimLocation, reGeocode);
+        return;
+    }
+
+    CLLocation *strongLocation = SWRunBuildStrongGPSLocation(location);
+    if (strongLocation) {
+        gPreflightLocation = strongLocation;
+        %orig(manager, strongLocation, reGeocode);
         return;
     }
     %orig;
@@ -1625,6 +1778,7 @@ static BOOL gHUDInitialized = NO;
                 gHUDInitialized = YES;
                 [[SWRunFloatingView sharedInstance] showCollapsed];
                 SWRunPatchAntiJailbreakSelectors();
+                SWRunPatchGPSGateSelectors();
                 NSLog(@"[SWRunHUD] ✅ 悬浮窗系统初始化完成");
                 NSLog(@"[SWRunHUD] 📱 运动世界 校园跑点位监控已激活");
                 NSLog(@"[SWRunHUD] 🔴 必经点(isFixed=1) 将显示为红色");
@@ -1648,6 +1802,8 @@ static BOOL gHUDInitialized = NO;
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
+
+    SWRunPatchGPSGateSelectors();
 
     NSString *className = NSStringFromClass([self class]);
 
@@ -1706,6 +1862,7 @@ static BOOL gHUDInitialized = NO;
             // 重新激活 overlay window
             [[SWRunFloatingView sharedInstance] showCollapsed];
             SWRunPatchAntiJailbreakSelectors();
+            SWRunPatchGPSGateSelectors();
             NSLog(@"[SWRunHUD] 🔄 App 进入前台, 悬浮球已显示");
         });
     }];
