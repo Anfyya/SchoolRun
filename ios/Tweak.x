@@ -1342,6 +1342,8 @@ static CLLocationSourceInformation *SWRunFakeLocationSourceInfo(void) {
     return nil;
 }
 
+static CLLocationAccuracy const kSWRunHorizontalAccuracy = 10.0;
+
 static BOOL SWRunCoordinateLooksUsable(CLLocationCoordinate2D coordinate) {
     if (!CLLocationCoordinate2DIsValid(coordinate)) return NO;
     return fabs(coordinate.latitude) > 0.000001 && fabs(coordinate.longitude) > 0.000001;
@@ -1358,7 +1360,7 @@ static CLLocation *SWRunBuildStrongGPSLocation(CLLocation *loc) {
     if (@available(iOS 13.4, *)) {
         return [[CLLocation alloc] initWithCoordinate:loc.coordinate
                                              altitude:altitude
-                                   horizontalAccuracy:4.0
+                                   horizontalAccuracy:kSWRunHorizontalAccuracy
                                      verticalAccuracy:3.0
                                                course:course
                                        courseAccuracy:3.0
@@ -1369,7 +1371,7 @@ static CLLocation *SWRunBuildStrongGPSLocation(CLLocation *loc) {
 
     return [[CLLocation alloc] initWithCoordinate:loc.coordinate
                                          altitude:altitude
-                               horizontalAccuracy:4.0
+                               horizontalAccuracy:kSWRunHorizontalAccuracy
                                  verticalAccuracy:3.0
                                            course:course
                                             speed:speed
@@ -1832,7 +1834,8 @@ void SWRunToggleSimulation(void) {
 - (CLLocationAccuracy)horizontalAccuracy {
     CLLocationAccuracy accuracy = %orig;
     if (accuracy < 0) return accuracy;
-    return MIN(accuracy, 4.0);
+    if (gSimActive) return kSWRunHorizontalAccuracy;
+    return accuracy;
 }
 
 - (CLLocationAccuracy)verticalAccuracy {
