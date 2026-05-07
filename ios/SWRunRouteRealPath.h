@@ -33,6 +33,7 @@ typedef double * _Nullable * _Nullable SWRunDistanceMatrix;
 @property (nonatomic, assign) SWPathSource  source;         // 数据来源
 @property (nonatomic, assign) double        duration;       // 预估时间(秒)
 @property (nonatomic, assign) BOOL          isAvailable;    // 是否获取成功
+@property (nonatomic, copy)   NSArray<NSValue *> *pathCoordinates; // 实际路径坐标
 
 @end
 
@@ -49,6 +50,11 @@ typedef double * _Nullable * _Nullable SWRunDistanceMatrix;
 - (void)walkingDistanceFrom:(CLLocationCoordinate2D)from
                          to:(CLLocationCoordinate2D)to
                  completion:(void(^)(SWPathSegment *result))completion;
+
+/// 串联多个控制点之间的真实步行路径坐标
+/// @param coordinates NSValue 包装的 CLLocationCoordinate2D 数组
+- (void)walkingRouteCoordinatesForCoordinates:(NSArray<NSValue *> *)coordinates
+                                   completion:(void(^)(NSArray<NSValue *> *routeCoordinates, SWPathSource overallSource))completion;
 
 /// 批量计算: 构建 N 个点之间的完整距离矩阵
 /// @param coordinates 坐标数组

@@ -7,6 +7,7 @@
 
 #import "SWRunFloatingView.h"
 #import "SWRunRoutePlanner.h"
+#import "SWRunRouteRealPath.h"
 #import "SWRunSimulator.h"
 #import <MapKit/MapKit.h>
 #import <math.h>
@@ -89,10 +90,13 @@ static double  const kMinimumRouteDistance = 1100.0;
 @property (nonatomic, strong) SWRunRoutePlan     *currentPlan;       // 当前路线规划
 @property (nonatomic, strong) MKPolyline         *routePolyline;
 @property (nonatomic, strong) MKPointAnnotation  *currentLocationAnnotation;
+@property (nonatomic, copy)   NSArray<NSValue *> *realRouteCoordinatesForMap;
 @property (nonatomic, assign) CLLocationCoordinate2D currentDisplayCoordinate;
 @property (nonatomic, assign) CLLocationCoordinate2D routeStartCoordinate;
 @property (nonatomic, assign) BOOL                hasCurrentDisplayCoordinate;
 @property (nonatomic, assign) BOOL                hasRouteStartCoordinate;
+@property (nonatomic, assign) NSUInteger          routeMapRequestID;
+@property (nonatomic, assign) BOOL                routeMapLoading;
 
 @end
 
@@ -296,15 +300,6 @@ static double  const kMinimumRouteDistance = 1100.0;
 // ============================================================
 #pragma mark - 路线小地图
 // ============================================================
-- (CLLocationCoordinate2D)coordinateFrom:(CLLocationCoordinate2D)coord
-                              eastMeters:(double)eastMeters
-                             northMeters:(double)northMeters {
-    double latDelta = northMeters / 111111.0;
-    double lonScale = MAX(0.2, cos(coord.latitude * M_PI / 180.0));
-    double lonDelta = eastMeters / (111111.0 * lonScale);
-    return CLLocationCoordinate2DMake(coord.latitude + latDelta, coord.longitude + lonDelta);
-}
-
 - (double)distanceForCoordinates:(NSArray<NSValue *> *)coords {
     if (coords.count < 2) return 0;
 
@@ -323,9 +318,7 @@ static double  const kMinimumRouteDistance = 1100.0;
     return total;
 }
 
-- (NSArray<NSValue *> *)routeCoordinatesForMap {
-    if (self.checkpoints.count < 2) return @[];
-
+- (NSArray<NSNumber *> *)effectiveRouteOrder {
     NSArray<NSNumber *> *order = self.currentPlan.optimalOrder.count > 0
         ? self.currentPlan.optimalOrder
         : nil;
@@ -336,7 +329,13 @@ static double  const kMinimumRouteDistance = 1100.0;
         }
         order = fallbackOrder;
     }
+    return order;
+}
 
+- (NSArray<NSValue *> *)routeControlCoordinates {
+    if (self.checkpoints.count < 2) return @[];
+
+    NSArray<NSNumber *> *order = [self effectiveRouteOrder];
     NSMutableArray<NSValue *> *coords = [NSMutableArray array];
     if (self.hasRouteStartCoordinate) {
         [coords addObject:[NSValue valueWithMKCoordinate:self.routeStartCoordinate]];
@@ -350,23 +349,75 @@ static double  const kMinimumRouteDistance = 1100.0;
         if (fabs(coord.latitude) < 0.000001 || fabs(coord.longitude) < 0.000001) continue;
         [coords addObject:[NSValue valueWithMKCoordinate:coord]];
     }
+    return coords;
+}
 
+- (NSArray<NSValue *> *)coordinatesByRetracingToMinimumDistance:(NSArray<NSValue *> *)sourceCoords {
+    if (sourceCoords.count < 2) return sourceCoords ?: @[];
+
+    NSMutableArray<NSValue *> *coords = [sourceCoords mutableCopy];
+    NSArray<NSValue *> *baseCoords = [sourceCoords copy];
     double routeDistance = [self distanceForCoordinates:coords];
-    if (coords.count > 0 && routeDistance < kMinimumRouteDistance) {
-        CLLocationCoordinate2D last;
-        [[coords lastObject] getValue:&last];
+    NSInteger guard = 0;
 
-        double side = (kMinimumRouteDistance - routeDistance) / 4.0;
-        CLLocationCoordinate2D p1 = [self coordinateFrom:last eastMeters:side northMeters:0];
-        CLLocationCoordinate2D p2 = [self coordinateFrom:last eastMeters:side northMeters:side];
-        CLLocationCoordinate2D p3 = [self coordinateFrom:last eastMeters:0 northMeters:side];
-        [coords addObject:[NSValue valueWithMKCoordinate:p1]];
-        [coords addObject:[NSValue valueWithMKCoordinate:p2]];
-        [coords addObject:[NSValue valueWithMKCoordinate:p3]];
-        [coords addObject:[NSValue valueWithMKCoordinate:last]];
+    while (routeDistance < kMinimumRouteDistance && guard < 8) {
+        guard++;
+        for (NSInteger i = (NSInteger)baseCoords.count - 2; i >= 0 && routeDistance < kMinimumRouteDistance; i--) {
+            CLLocationCoordinate2D last;
+            [[coords lastObject] getValue:&last];
+            CLLocationCoordinate2D next;
+            [baseCoords[i] getValue:&next];
+            routeDistance += [SWRunRoutePlanner distanceFromLat:last.latitude lng:last.longitude
+                                                          toLat:next.latitude lng:next.longitude];
+            [coords addObject:baseCoords[i]];
+        }
+        for (NSInteger i = 1; i < baseCoords.count && routeDistance < kMinimumRouteDistance; i++) {
+            CLLocationCoordinate2D last;
+            [[coords lastObject] getValue:&last];
+            CLLocationCoordinate2D next;
+            [baseCoords[i] getValue:&next];
+            routeDistance += [SWRunRoutePlanner distanceFromLat:last.latitude lng:last.longitude
+                                                          toLat:next.latitude lng:next.longitude];
+            [coords addObject:baseCoords[i]];
+        }
     }
 
     return coords;
+}
+
+- (NSArray<NSValue *> *)routeCoordinatesForMap {
+    if (self.routeMapLoading && self.realRouteCoordinatesForMap.count < 2) return @[];
+
+    NSArray<NSValue *> *coords = self.realRouteCoordinatesForMap.count >= 2
+        ? self.realRouteCoordinatesForMap
+        : [self routeControlCoordinates];
+    return [self coordinatesByRetracingToMinimumDistance:coords];
+}
+
+- (void)rebuildRealRouteMapPath {
+    NSArray<NSValue *> *controls = [self routeControlCoordinates];
+    if (controls.count < 2) {
+        self.realRouteCoordinatesForMap = nil;
+        self.routeMapLoading = NO;
+        [self refreshRouteMap];
+        return;
+    }
+
+    NSUInteger requestID = ++self.routeMapRequestID;
+    self.realRouteCoordinatesForMap = nil;
+    self.routeMapLoading = YES;
+    [self refreshRouteMap];
+
+    [[SWRunRouteRealPath sharedInstance] walkingRouteCoordinatesForCoordinates:controls
+                                                                    completion:^(NSArray<NSValue *> *routeCoordinates, SWPathSource source) {
+        (void)source;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (requestID != self.routeMapRequestID) return;
+            self.routeMapLoading = NO;
+            self.realRouteCoordinatesForMap = routeCoordinates.count >= 2 ? routeCoordinates : controls;
+            [self refreshRouteMap];
+        });
+    }];
 }
 
 - (void)addCurrentLocationAnnotationIfNeeded {
@@ -677,6 +728,9 @@ static double  const kMinimumRouteDistance = 1100.0;
     dispatch_async(dispatch_get_main_queue(), ^{
         self.checkpoints = checkpoints ?: @[];
         self.totalDistance = totalDistance;
+        self.realRouteCoordinatesForMap = nil;
+        self.routeMapLoading = NO;
+        self.routeMapRequestID++;
 
         double km = totalDistance / 1000.0;
         self.distanceLabel.text = [NSString stringWithFormat:@"总里程: %.2f km", km];
@@ -693,7 +747,7 @@ static double  const kMinimumRouteDistance = 1100.0;
                                 (long)passedFixed, (long)fixedCount];
 
         [self.tableView reloadData];
-        [self refreshRouteMap];
+        [self rebuildRealRouteMapPath];
         [self setNeedsLayout];
 
         // 有数据时自动弹出
@@ -727,12 +781,16 @@ static double  const kMinimumRouteDistance = 1100.0;
 
         self.currentDisplayCoordinate = coord;
         self.hasCurrentDisplayCoordinate = YES;
-
         if (self.currentLocationAnnotation) {
             self.currentLocationAnnotation.coordinate = coord;
+        }
+
+        if (routeNeedsRefresh) {
+            [self rebuildRealRouteMapPath];
+        } else if (self.currentLocationAnnotation) {
             MKMapPoint point = MKMapPointForCoordinate(coord);
             MKMapRect visible = self.routeMapView.visibleMapRect;
-            if (routeNeedsRefresh || !MKMapRectContainsPoint(visible, point)) {
+            if (!MKMapRectContainsPoint(visible, point)) {
                 [self refreshRouteMap];
             }
         } else {
@@ -759,6 +817,9 @@ static double  const kMinimumRouteDistance = 1100.0;
         if (!plan) {
             self.routeInfoLabel.text = @"";
             self.routeInfoLabel.hidden = YES;
+            self.realRouteCoordinatesForMap = nil;
+            self.routeMapLoading = NO;
+            self.routeMapRequestID++;
             [self setNeedsLayout];
             return;
         }
@@ -830,7 +891,7 @@ static double  const kMinimumRouteDistance = 1100.0;
 
         self.routeInfoLabel.attributedText = attr;
         self.routeInfoLabel.hidden = NO;
-        [self refreshRouteMap];
+        [self rebuildRealRouteMapPath];
 
         // 刷新布局
         [self setNeedsLayout];
@@ -973,8 +1034,11 @@ static double  const kMinimumRouteDistance = 1100.0;
             SWRunSimulator *sim = [SWRunSimulator sharedInstance];
             SWSimulatedMotionData *md = sim.motionData;
             CLLocation *loc = sim.currentLocation;
+            NSString *targetText = sim.currentTargetIndex >= 0
+                ? [NSString stringWithFormat:@"P%ld", (long)(sim.currentTargetIndex + 1)]
+                : @"补足距离";
             self.simStatusLabel.text = [NSString stringWithFormat:
-                @"模拟中 %.0f/%.0fm  %.0fs\n步数 %ld  步频 %.0f步/分  配速 %.2fs/m\n海拔 %.1fm  气压 %.2fkPa  航向 %.0f°\n当前位置 %.6f, %.6f  目标 P%ld",
+                @"模拟中 %.0f/%.0fm  %.0fs\n步数 %ld  步频 %.0f步/分  配速 %.2fs/m\n海拔 %.1fm  气压 %.2fkPa  航向 %.0f°\n当前位置 %.6f, %.6f  目标 %@",
                 sim.traveledDistance, sim.totalPathDistance,
                 sim.elapsedSeconds,
                 (long)md.numberOfSteps,
@@ -985,7 +1049,7 @@ static double  const kMinimumRouteDistance = 1100.0;
                 md.currentHeading,
                 loc.coordinate.latitude,
                 loc.coordinate.longitude,
-                (long)(sim.currentTargetIndex + 1)];
+                targetText];
         } else {
             [self.simBtn setTitle:@"▶️模拟" forState:UIControlStateNormal];
             [self.simBtn setTitleColor:[UIColor colorWithRed:0.3 green:1.0 blue:0.5 alpha:1.0] forState:UIControlStateNormal];

@@ -12,6 +12,7 @@
 #import <objc/message.h>
 #import <CoreLocation/CoreLocation.h>
 #import <CoreMotion/CoreMotion.h>
+#import <MapKit/MapKit.h>
 #import <math.h>
 #import <errno.h>
 #import <stdio.h>
@@ -25,6 +26,7 @@
 #import <unistd.h>
 #import "SWRunFloatingView.h"
 #import "SWRunRoutePlanner.h"
+#import "SWRunRouteRealPath.h"
 #import "SWRunSimulator.h"
 
 @interface NSURLSession (SWRunCheckpointHUD)
@@ -1311,6 +1313,7 @@ void SWRunForceParseCheckpoints(void) {
 
 /// 全局状态
 static BOOL        gSimActive        = NO;
+static BOOL        gSimStarting      = NO;
 static CLLocation *gSimLocation      = nil;
 static CLLocation *gPreflightLocation = nil;
 /// 已注册的 CLLocationManager 实例 (弱引用)
@@ -1463,9 +1466,41 @@ static void SWRunDeliverHeadingToDelegates(void) {
 
 void SWRunStopGPSSimulation(void);
 
+static NSArray<NSValue *> *SWRunBuildRouteControls(SWRunFloatingView *hud,
+                                                   SWRunRoutePlan *plan,
+                                                   CLLocation *realStartLocation) {
+    if (!hud || !plan || plan.optimalOrder.count < 2) return @[];
+
+    NSArray<SWRunCheckpoint *> *checkpoints = [hud valueForKey:@"checkpoints"];
+    if (![checkpoints isKindOfClass:[NSArray class]] || checkpoints.count < 2) return @[];
+
+    NSMutableArray<NSValue *> *coords = [NSMutableArray array];
+    if (realStartLocation && SWRunCoordinateLooksUsable(realStartLocation.coordinate)) {
+        [coords addObject:[NSValue valueWithMKCoordinate:realStartLocation.coordinate]];
+    }
+
+    for (NSNumber *idxNum in plan.optimalOrder) {
+        NSInteger idx = [idxNum integerValue];
+        if (idx < 0 || idx >= checkpoints.count) continue;
+        SWRunCheckpoint *cp = checkpoints[idx];
+        CLLocationCoordinate2D coord = CLLocationCoordinate2DMake(cp.latitude, cp.longitude);
+        if (!SWRunCoordinateLooksUsable(coord)) continue;
+        [coords addObject:[NSValue valueWithMKCoordinate:coord]];
+    }
+
+    return coords;
+}
+
+static NSString *SWRunCurrentTargetLabel(SWRunSimulator *sim) {
+    if (sim.currentTargetIndex >= 0) {
+        return [NSString stringWithFormat:@"P%ld", (long)(sim.currentTargetIndex + 1)];
+    }
+    return @"补足距离";
+}
+
 /// 启动GPS模拟 — 由浮动窗按钮触发
 void SWRunStartGPSSimulation(void) {
-    if (gSimActive) return;
+    if (gSimActive || gSimStarting) return;
 
     // 获取当前路线规划
     SWRunFloatingView *hud = [SWRunFloatingView sharedInstance];
@@ -1487,10 +1522,24 @@ void SWRunStartGPSSimulation(void) {
         NSLog(@"[SWRunHUD] ⚠️ 未取得真实当前位置, 将从路线首点开始");
     }
 
-    [[SWRunSimulator sharedInstance]
+    NSArray<NSValue *> *routeControls = SWRunBuildRouteControls(hud, plan, realStartLocation);
+    gSimStarting = YES;
+    [hud updateSimulationStatus:@"正在获取真实步行路线..." location:realStartLocation];
+
+    [[SWRunRouteRealPath sharedInstance] walkingRouteCoordinatesForCoordinates:routeControls
+                                                                    completion:^(NSArray<NSValue *> *routeCoordinates, SWPathSource routeSource) {
+        if (!gSimStarting || gSimActive) return;
+        gSimStarting = NO;
+        NSLog(@"[SWRunHUD] 🛤 真实路线坐标已准备: %lu 个点, 来源=%ld",
+              (unsigned long)routeCoordinates.count, (long)routeSource);
+
+        NSArray<NSValue *> *simRouteCoordinates = routeCoordinates.count >= 2 ? routeCoordinates : routeControls;
+
+        [[SWRunSimulator sharedInstance]
         startSimulationWithCheckpoints:[hud valueForKey:@"checkpoints"]
                           visitOrder:plan.optimalOrder
                         startLocation:realStartLocation
+                     routeCoordinates:simRouteCoordinates
                      onTick:^(CLLocation *loc, NSInteger step) {
         gSimLocation = SWRunBuildStrongGPSLocation(loc) ?: loc;
         gSimActive = YES;
@@ -1498,8 +1547,9 @@ void SWRunStartGPSSimulation(void) {
         // ★ 更新悬浮窗状态标签
         SWRunSimulator *sim = [SWRunSimulator sharedInstance];
         SWSimulatedMotionData *md = sim.motionData;
+        NSString *targetLabel = SWRunCurrentTargetLabel(sim);
         NSString *status = [NSString stringWithFormat:
-            @"模拟中 %.0f/%.0fm  %.0fs\n步数 %ld  步频 %.0f步/分  配速 %.2fs/m\n海拔 %.1fm  气压 %.2fkPa  航向 %.0f°\n当前位置 %.6f, %.6f  目标 P%ld",
+            @"模拟中 %.0f/%.0fm  %.0fs\n步数 %ld  步频 %.0f步/分  配速 %.2fs/m\n海拔 %.1fm  气压 %.2fkPa  航向 %.0f°\n当前位置 %.6f, %.6f  目标 %@",
             sim.traveledDistance, sim.totalPathDistance,
             sim.elapsedSeconds,
             (long)md.numberOfSteps,
@@ -1510,7 +1560,7 @@ void SWRunStartGPSSimulation(void) {
             md.currentHeading,
             gSimLocation.coordinate.latitude,
             gSimLocation.coordinate.longitude,
-            (long)(sim.currentTargetIndex + 1)];
+            targetLabel];
         dispatch_async(dispatch_get_main_queue(), ^{
             [hud updateSimulationStatus:status location:gSimLocation];
         });
@@ -1526,19 +1576,24 @@ void SWRunStartGPSSimulation(void) {
                         userInfo:@{@"location": gSimLocation ?: loc}];
     }
     onComplete:^(BOOL finished) {
+        gSimStarting = NO;
         gSimActive = NO;
         gSimLocation = nil;
         SWRunStopGPSSimulation();
         NSLog(@"[SWRunHUD] %@", finished ? @"✅ GPS模拟完成" : @"❌ GPS模拟异常终止");
     }];
 
-    // 更新悬浮窗状态
-    [hud setSimulationRunning:YES];
+        // 更新悬浮窗状态
+        if ([SWRunSimulator sharedInstance].state == SWSimulatorStateRunning) {
+            [hud setSimulationRunning:YES];
+        }
+    }];
 }
 
 /// 停止GPS模拟
 void SWRunStopGPSSimulation(void) {
     [[SWRunSimulator sharedInstance] stop];
+    gSimStarting = NO;
     gSimActive = NO;
     gSimLocation = nil;
     [[SWRunFloatingView sharedInstance] setSimulationRunning:NO];

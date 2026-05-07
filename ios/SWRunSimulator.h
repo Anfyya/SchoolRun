@@ -76,6 +76,7 @@ typedef NS_ENUM(NSInteger, SWSimulatorState) {
 - (void)startSimulationWithCheckpoints:(NSArray<SWRunCheckpoint *> *)checkpoints
                           visitOrder:(NSArray<NSNumber *> *)optimalOrder
                         startLocation:(nullable CLLocation *)startLocation
+                     routeCoordinates:(nullable NSArray<NSValue *> *)routeCoordinates
                      onTick:(SWSimulatorTickBlock)tickBlock
                   onComplete:(nullable SWSimulatorCompleteBlock)completeBlock;
 

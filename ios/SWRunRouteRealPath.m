@@ -125,11 +125,129 @@
 }
 
 - (SWPathSegment * _Nullable)cachedResultFrom:(CLLocationCoordinate2D)from to:(CLLocationCoordinate2D)to {
-    return self.cache[[self cacheKeyFrom:from to:to]];
+    SWPathSegment *direct = self.cache[[self cacheKeyFrom:from to:to]];
+    if (direct) return direct;
+
+    SWPathSegment *reverse = self.cache[[self cacheKeyFrom:to to:from]];
+    if (!reverse) return nil;
+
+    SWPathSegment *copy = [[SWPathSegment alloc] init];
+    copy.distance = reverse.distance;
+    copy.straightDistance = reverse.straightDistance;
+    copy.source = reverse.source;
+    copy.duration = reverse.duration;
+    copy.isAvailable = reverse.isAvailable;
+    if (reverse.pathCoordinates.count > 0) {
+        copy.pathCoordinates = [[reverse.pathCoordinates reverseObjectEnumerator] allObjects];
+    }
+    return copy;
 }
 
 - (void)setCachedResult:(SWPathSegment *)result from:(CLLocationCoordinate2D)from to:(CLLocationCoordinate2D)to {
     self.cache[[self cacheKeyFrom:from to:to]] = result;
+}
+
+- (NSArray<NSValue *> *)fallbackPathCoordinatesFrom:(CLLocationCoordinate2D)from to:(CLLocationCoordinate2D)to {
+    return @[[NSValue valueWithMKCoordinate:from], [NSValue valueWithMKCoordinate:to]];
+}
+
+- (NSArray<NSValue *> *)coordinatesFromPolyline:(MKPolyline *)polyline {
+    if (!polyline || polyline.pointCount == 0) return @[];
+
+    NSMutableArray<NSValue *> *coords = [NSMutableArray arrayWithCapacity:polyline.pointCount];
+    MKMapPoint *points = polyline.points;
+    for (NSUInteger i = 0; i < polyline.pointCount; i++) {
+        CLLocationCoordinate2D coord = MKCoordinateForMapPoint(points[i]);
+        if (CLLocationCoordinate2DIsValid(coord) &&
+            fabs(coord.latitude) > 0.000001 &&
+            fabs(coord.longitude) > 0.000001) {
+            [coords addObject:[NSValue valueWithMKCoordinate:coord]];
+        }
+    }
+    return coords;
+}
+
+- (NSArray<NSValue *> *)coordinatesFromAMapPolylineString:(NSString *)polylineString {
+    if (![polylineString isKindOfClass:[NSString class]] || polylineString.length == 0) return @[];
+
+    NSMutableArray<NSValue *> *coords = [NSMutableArray array];
+    for (NSString *pair in [polylineString componentsSeparatedByString:@";"]) {
+        NSArray<NSString *> *parts = [pair componentsSeparatedByString:@","];
+        if (parts.count < 2) continue;
+
+        double lng = [parts[0] doubleValue];
+        double lat = [parts[1] doubleValue];
+        CLLocationCoordinate2D coord = CLLocationCoordinate2DMake(lat, lng);
+        if (CLLocationCoordinate2DIsValid(coord) &&
+            fabs(coord.latitude) > 0.000001 &&
+            fabs(coord.longitude) > 0.000001) {
+            [coords addObject:[NSValue valueWithMKCoordinate:coord]];
+        }
+    }
+    return coords;
+}
+
+- (id)safeValueFromObject:(id)object forKey:(NSString *)key {
+    if (!object || key.length == 0) return nil;
+    @try {
+        return [object valueForKey:key];
+    } @catch (NSException *exception) {
+        return nil;
+    }
+}
+
+- (NSArray<NSValue *> *)pathCoordinatesFromAMapResponse:(id)response {
+    NSMutableArray<NSValue *> *coords = [NSMutableArray array];
+    id route = [self safeValueFromObject:response forKey:@"route"];
+    id paths = [self safeValueFromObject:route forKey:@"paths"];
+    if (![paths isKindOfClass:[NSArray class]] || [(NSArray *)paths count] == 0) {
+        id routes = [self safeValueFromObject:response forKey:@"routes"];
+        id firstRoute = [routes isKindOfClass:[NSArray class]] ? [(NSArray *)routes firstObject] : nil;
+        paths = [self safeValueFromObject:firstRoute forKey:@"paths"];
+        if (![paths isKindOfClass:[NSArray class]] || [(NSArray *)paths count] == 0) {
+            paths = firstRoute ? @[firstRoute] : nil;
+        }
+    }
+
+    id firstPath = [paths isKindOfClass:[NSArray class]] ? [(NSArray *)paths firstObject] : nil;
+    id steps = [self safeValueFromObject:firstPath forKey:@"steps"];
+    if (![steps isKindOfClass:[NSArray class]]) return @[];
+
+    for (id step in (NSArray *)steps) {
+        NSString *polyline = [self safeValueFromObject:step forKey:@"polyline"];
+        NSArray<NSValue *> *stepCoords = [self coordinatesFromAMapPolylineString:polyline];
+        for (NSValue *value in stepCoords) {
+            if (coords.count > 0) {
+                CLLocationCoordinate2D last;
+                [[coords lastObject] getValue:&last];
+                CLLocationCoordinate2D next;
+                [value getValue:&next];
+                if (fabs(last.latitude - next.latitude) < 0.000001 &&
+                    fabs(last.longitude - next.longitude) < 0.000001) {
+                    continue;
+                }
+            }
+            [coords addObject:value];
+        }
+    }
+    return coords;
+}
+
+- (void)appendSegmentCoordinates:(NSArray<NSValue *> *)segmentCoords
+                  toRouteCoords:(NSMutableArray<NSValue *> *)routeCoords {
+    for (NSValue *value in segmentCoords) {
+        if (routeCoords.count > 0) {
+            CLLocationCoordinate2D last;
+            [[routeCoords lastObject] getValue:&last];
+            CLLocationCoordinate2D next;
+            [value getValue:&next];
+            if (fabs(last.latitude - next.latitude) < 0.000001 &&
+                fabs(last.longitude - next.longitude) < 0.000001) {
+                continue;
+            }
+        }
+        [routeCoords addObject:value];
+    }
 }
 
 // ============================================================
@@ -150,6 +268,7 @@
         seg.source = SWPathSourceAMap;
         seg.isAvailable = YES;
         seg.duration = 0;
+        seg.pathCoordinates = @[[NSValue valueWithMKCoordinate:from]];
         dispatch_async(dispatch_get_main_queue(), ^{ completion(seg); });
         return;
     }
@@ -164,7 +283,8 @@
     // 优先: 高德地图
     if ([self isAMapAvailable]) {
         [self amapWalkingFrom:from to:to completion:^(SWPathSegment *result) {
-            if (result.source == SWPathSourceStraightLine && [self isAppleMapsAvailable]) {
+            if ((result.source == SWPathSourceStraightLine || result.pathCoordinates.count <= 2) &&
+                [self isAppleMapsAvailable]) {
                 [self appleWalkingFrom:from to:to completion:^(SWPathSegment *appleResult) {
                     [self setCachedResult:appleResult from:from to:to];
                     completion(appleResult);
@@ -245,7 +365,9 @@
                 }
 
                 SWPathSegment *seg = [weakSelf parseAMapWalkingResponse:response
-                                                         straightDistance:straightDist];
+                                                                    from:from
+                                                                      to:to
+                                                        straightDistance:straightDist];
                 dispatch_async(dispatch_get_main_queue(), ^{ completion(seg); });
             };
 
@@ -283,38 +405,47 @@
 }
 
 /// 解析高德步行响应
-- (SWPathSegment *)parseAMapWalkingResponse:(id)response straightDistance:(double)straightDist {
+- (SWPathSegment *)parseAMapWalkingResponse:(id)response
+                                       from:(CLLocationCoordinate2D)from
+                                         to:(CLLocationCoordinate2D)to
+                           straightDistance:(double)straightDist {
     SWPathSegment *seg = [[SWPathSegment alloc] init];
     seg.straightDistance = straightDist;
     seg.isAvailable = (response != nil);
+    seg.pathCoordinates = [self fallbackPathCoordinatesFrom:from to:to];
 
     @try {
-        // 获取 routes 数组
-        id routes = nil;
-        if ([response respondsToSelector:@selector(routes)]) {
-            routes = [response performSelector:@selector(routes)];
-        }
+        id route = [self safeValueFromObject:response forKey:@"route"];
+        id paths = [self safeValueFromObject:route forKey:@"paths"];
+        id firstPath = [paths isKindOfClass:[NSArray class]] ? [(NSArray *)paths firstObject] : nil;
 
-        if ([routes isKindOfClass:[NSArray class]] && [(NSArray *)routes count] > 0) {
-            id firstRoute = [(NSArray *)routes firstObject];
+        id routes = [self safeValueFromObject:response forKey:@"routes"];
+        id firstRoute = [routes isKindOfClass:[NSArray class]] ? [(NSArray *)routes firstObject] : nil;
+        id distanceSource = firstPath ?: firstRoute;
 
-            // 获取距离
-            if ([firstRoute respondsToSelector:@selector(distance)]) {
-                NSNumber *dist = [firstRoute performSelector:@selector(distance)];
+        if (distanceSource) {
+            id dist = [self safeValueFromObject:distanceSource forKey:@"distance"];
+            if ([dist respondsToSelector:@selector(doubleValue)]) {
                 seg.distance = [dist doubleValue];
                 seg.source = SWPathSourceAMap;
             }
 
-            // 获取时间
-            if ([firstRoute respondsToSelector:@selector(duration)]) {
-                NSNumber *dur = [firstRoute performSelector:@selector(duration)];
+            id dur = [self safeValueFromObject:distanceSource forKey:@"duration"];
+            if (![dur respondsToSelector:@selector(doubleValue)]) {
+                dur = [self safeValueFromObject:distanceSource forKey:@"cost"];
+            }
+            if ([dur respondsToSelector:@selector(doubleValue)]) {
                 seg.duration = [dur doubleValue];
             }
         } else {
-            // 没有找到路径
             seg.distance = straightDist;
             seg.source = SWPathSourceStraightLine;
             seg.isAvailable = NO;
+        }
+
+        NSArray<NSValue *> *amapCoords = [self pathCoordinatesFromAMapResponse:response];
+        if (amapCoords.count >= 2) {
+            seg.pathCoordinates = amapCoords;
         }
     } @catch (NSException *exception) {
         seg.distance = straightDist;
@@ -326,6 +457,9 @@
     if (seg.distance < straightDist * 0.8 || seg.distance > straightDist * 6.0) {
         seg.distance = straightDist * 1.3; // 经验值: 步行通常比直线多30%
         seg.source = SWPathSourceAMap;
+    }
+    if (seg.pathCoordinates.count < 2) {
+        seg.pathCoordinates = [self fallbackPathCoordinatesFrom:from to:to];
     }
 
     return seg;
@@ -364,12 +498,15 @@
             seg.source = SWPathSourceStraightLine;
             seg.isAvailable = NO;
             seg.duration = straightDist / 1.4;
+            seg.pathCoordinates = [self fallbackPathCoordinatesFrom:from to:to];
         } else {
             MKRoute *route = response.routes.firstObject;
             seg.distance = route.distance;
             seg.duration = route.expectedTravelTime;
             seg.source = SWPathSourceAppleMaps;
             seg.isAvailable = YES;
+            NSArray<NSValue *> *routeCoords = [self coordinatesFromPolyline:route.polyline];
+            seg.pathCoordinates = routeCoords.count >= 2 ? routeCoords : [self fallbackPathCoordinatesFrom:from to:to];
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{ completion(seg); });
@@ -390,7 +527,50 @@
     seg.source = SWPathSourceStraightLine;
     seg.isAvailable = YES;
     seg.duration = d / 1.4; // 步行 1.4 m/s
+    seg.pathCoordinates = [self fallbackPathCoordinatesFrom:from to:to];
     return seg;
+}
+
+- (void)walkingRouteCoordinatesForCoordinates:(NSArray<NSValue *> *)coordinates
+                                   completion:(void(^)(NSArray<NSValue *> *routeCoordinates, SWPathSource overallSource))completion {
+    if (!completion) return;
+
+    if (coordinates.count < 2) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(coordinates ?: @[], SWPathSourceStraightLine);
+        });
+        return;
+    }
+
+    NSMutableArray<NSValue *> *routeCoords = [NSMutableArray array];
+    __block SWPathSource worstSource = SWPathSourceAMap;
+    __block void (^walkNext)(NSInteger index);
+
+    walkNext = ^(NSInteger index) {
+        if (index >= coordinates.count - 1) {
+            completion(routeCoords, worstSource);
+            return;
+        }
+
+        CLLocationCoordinate2D from;
+        [coordinates[index] getValue:&from];
+        CLLocationCoordinate2D to;
+        [coordinates[index + 1] getValue:&to];
+
+        [self walkingDistanceFrom:from to:to completion:^(SWPathSegment *result) {
+            if (result.source > worstSource) {
+                worstSource = result.source;
+            }
+
+            NSArray<NSValue *> *segmentCoords = result.pathCoordinates.count >= 2
+                ? result.pathCoordinates
+                : [self fallbackPathCoordinatesFrom:from to:to];
+            [self appendSegmentCoordinates:segmentCoords toRouteCoords:routeCoords];
+            walkNext(index + 1);
+        }];
+    };
+
+    walkNext(0);
 }
 
 // ============================================================

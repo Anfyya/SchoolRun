@@ -9,7 +9,9 @@
 #import "SWRunSimulator.h"
 #import "SWRunFloatingView.h"
 #import "SWRunRoutePlanner.h"
+#import <MapKit/MapKit.h>
 #import <UIKit/UIKit.h>
+#import <float.h>
 
 // ============================================================
 #pragma mark - SWSimulatedMotionData
@@ -69,6 +71,7 @@ static double const kMinimumPathDistance  = 1100.0; // 路线距离下限
 @property (nonatomic, strong) NSArray<SWRunCheckpoint *>  *checkpoints;
 @property (nonatomic, strong) NSArray<NSNumber *>         *visitOrder;
 @property (nonatomic, strong) CLLocation                  *startLocation;
+@property (nonatomic, copy)   NSArray<NSValue *>          *routeCoordinates;
 @property (nonatomic, assign) double                       nextFloorDistance;
 
 - (void)resetMotionData;
@@ -80,8 +83,10 @@ static double const kMinimumPathDistance  = 1100.0; // 路线距离下限
 - (void)updateMotionDataWithStepDistance:(double)stepDistance speed:(double)speed;
 - (double)headingFrom:(CLLocationCoordinate2D)from to:(CLLocationCoordinate2D)to;
 - (void)appendPathSegmentToLocation:(CLLocation *)endLoc totalDistance:(double *)totalDist;
-- (void)appendMinimumDistanceLoopIfNeeded:(double *)totalDist;
+- (void)appendMinimumDistanceRetraceIfNeeded:(double *)totalDist;
 - (BOOL)locationLooksUsable:(CLLocation *)location;
+- (void)appendRouteCoordinates:(NSArray<NSValue *> *)routeCoordinates totalDistance:(double *)totalDist;
+- (void)rebuildCheckpointIndicesFromPath;
 
 @end
 
@@ -163,27 +168,77 @@ static double const kMinimumPathDistance  = 1100.0; // 路线距离下限
     }
 }
 
-- (void)appendMinimumDistanceLoopIfNeeded:(double *)totalDist {
+- (void)appendMinimumDistanceRetraceIfNeeded:(double *)totalDist {
     if (!totalDist || *totalDist >= kMinimumPathDistance || self.pathPoints.count == 0) return;
+    if (self.pathPoints.count < 2) return;
 
-    CLLocation *lastLoc = [self.pathPoints lastObject];
-    CLLocationCoordinate2D base = lastLoc.coordinate;
-    double deficit = kMinimumPathDistance - *totalDist;
-    double side = deficit / 4.0;
-    double latMeters = 111111.0;
-    double lonMeters = 111111.0 * MAX(0.2, cos(base.latitude * M_PI / 180.0));
+    NSArray<CLLocation *> *basePath = [self.pathPoints copy];
+    NSInteger guard = 0;
+    while (*totalDist < kMinimumPathDistance && guard < 8) {
+        guard++;
 
-    CLLocationCoordinate2D p1 = CLLocationCoordinate2DMake(base.latitude,
-                                                           base.longitude + side / lonMeters);
-    CLLocationCoordinate2D p2 = CLLocationCoordinate2DMake(base.latitude + side / latMeters,
-                                                           base.longitude + side / lonMeters);
-    CLLocationCoordinate2D p3 = CLLocationCoordinate2DMake(base.latitude + side / latMeters,
-                                                           base.longitude);
+        for (NSInteger i = (NSInteger)basePath.count - 2; i >= 0 && *totalDist < kMinimumPathDistance; i--) {
+            CLLocation *loc = basePath[i];
+            [self appendPathSegmentToLocation:loc totalDistance:totalDist];
+        }
 
-    [self appendPathSegmentToLocation:[self makeLocation:p1.latitude lng:p1.longitude] totalDistance:totalDist];
-    [self appendPathSegmentToLocation:[self makeLocation:p2.latitude lng:p2.longitude] totalDistance:totalDist];
-    [self appendPathSegmentToLocation:[self makeLocation:p3.latitude lng:p3.longitude] totalDistance:totalDist];
-    [self appendPathSegmentToLocation:[self makeLocation:base.latitude lng:base.longitude] totalDistance:totalDist];
+        for (NSInteger i = 1; i < basePath.count && *totalDist < kMinimumPathDistance; i++) {
+            CLLocation *loc = basePath[i];
+            [self appendPathSegmentToLocation:loc totalDistance:totalDist];
+        }
+    }
+}
+
+- (void)appendRouteCoordinates:(NSArray<NSValue *> *)routeCoordinates totalDistance:(double *)totalDist {
+    if (!totalDist || routeCoordinates.count == 0) return;
+
+    for (NSValue *value in routeCoordinates) {
+        CLLocationCoordinate2D coord;
+        [value getValue:&coord];
+        if (!CLLocationCoordinate2DIsValid(coord) ||
+            fabs(coord.latitude) < 0.000001 ||
+            fabs(coord.longitude) < 0.000001) {
+            continue;
+        }
+
+        CLLocation *loc = [self makeLocation:coord.latitude lng:coord.longitude];
+        if (self.pathPoints.count == 0) {
+            [self.pathPoints addObject:loc];
+            [self.pathCumulativeDistances addObject:@(0)];
+            continue;
+        }
+
+        CLLocation *lastLoc = [self.pathPoints lastObject];
+        if ([lastLoc distanceFromLocation:loc] < 0.2) continue;
+        [self appendPathSegmentToLocation:loc totalDistance:totalDist];
+    }
+}
+
+- (void)rebuildCheckpointIndicesFromPath {
+    [self.checkpointIndices removeAllObjects];
+    if (self.pathPoints.count == 0 || self.visitOrder.count == 0) return;
+
+    NSInteger searchStart = 0;
+    for (NSNumber *idxNum in self.visitOrder) {
+        NSInteger cpIdx = [idxNum integerValue];
+        if (cpIdx < 0 || cpIdx >= self.checkpoints.count) continue;
+
+        SWRunCheckpoint *cp = self.checkpoints[cpIdx];
+        CLLocation *targetLoc = [[CLLocation alloc] initWithLatitude:cp.latitude longitude:cp.longitude];
+        NSInteger bestIndex = searchStart;
+        double bestDistance = DBL_MAX;
+
+        for (NSInteger i = searchStart; i < self.pathPoints.count; i++) {
+            double d = [self.pathPoints[i] distanceFromLocation:targetLoc];
+            if (d < bestDistance) {
+                bestDistance = d;
+                bestIndex = i;
+            }
+        }
+
+        [self.checkpointIndices addObject:@(bestIndex)];
+        searchStart = MIN(bestIndex + 1, (NSInteger)self.pathPoints.count - 1);
+    }
 }
 
 /// 根据检查点和访问顺序生成完整路径点序列
@@ -197,32 +252,48 @@ static double const kMinimumPathDistance  = 1100.0; // 路线距离下限
     double totalDist = 0;
     BOOL hasRealStart = [self locationLooksUsable:self.startLocation];
 
-    if (hasRealStart) {
-        [self.pathPoints addObject:self.startLocation];
-        [self.pathCumulativeDistances addObject:@(0)];
-    }
-
-    for (NSInteger i = 0; i < self.visitOrder.count; i++) {
-        NSInteger cpIdx = [self.visitOrder[i] integerValue];
-        SWRunCheckpoint *cp = self.checkpoints[cpIdx];
-
-        if (i == 0 && !hasRealStart) {
-            // 第一个点: 直接添加
-            CLLocation *loc = [self makeLocation:cp.latitude lng:cp.longitude];
-            [self.pathPoints addObject:loc];
-            [self.pathCumulativeDistances addObject:@(0)];
-            [self.checkpointIndices addObject:@(self.pathPoints.count - 1)];
+    BOOL usedRouteCoordinates = NO;
+    if (self.routeCoordinates.count >= 2) {
+        [self appendRouteCoordinates:self.routeCoordinates totalDistance:&totalDist];
+        if (self.pathPoints.count >= 2) {
+            [self rebuildCheckpointIndicesFromPath];
+            usedRouteCoordinates = YES;
         } else {
-            // 从真实起点或上一个 checkpoint 到当前 checkpoint 生成中间路径点
-            CLLocation *endLoc   = [self makeLocation:cp.latitude lng:cp.longitude];
-            [self appendPathSegmentToLocation:endLoc totalDistance:&totalDist];
-
-            // 标记 checkpoint 位置
-            [self.checkpointIndices addObject:@(self.pathPoints.count - 1)];
+            [self.pathPoints removeAllObjects];
+            [self.pathCumulativeDistances removeAllObjects];
+            [self.checkpointIndices removeAllObjects];
+            totalDist = 0;
         }
     }
 
-    [self appendMinimumDistanceLoopIfNeeded:&totalDist];
+    if (!usedRouteCoordinates) {
+        if (hasRealStart) {
+            [self.pathPoints addObject:self.startLocation];
+            [self.pathCumulativeDistances addObject:@(0)];
+        }
+
+        for (NSInteger i = 0; i < self.visitOrder.count; i++) {
+            NSInteger cpIdx = [self.visitOrder[i] integerValue];
+            SWRunCheckpoint *cp = self.checkpoints[cpIdx];
+
+            if (i == 0 && !hasRealStart) {
+                // 第一个点: 直接添加
+                CLLocation *loc = [self makeLocation:cp.latitude lng:cp.longitude];
+                [self.pathPoints addObject:loc];
+                [self.pathCumulativeDistances addObject:@(0)];
+                [self.checkpointIndices addObject:@(self.pathPoints.count - 1)];
+            } else {
+                // 从真实起点或上一个 checkpoint 到当前 checkpoint 生成中间路径点
+                CLLocation *endLoc   = [self makeLocation:cp.latitude lng:cp.longitude];
+                [self appendPathSegmentToLocation:endLoc totalDistance:&totalDist];
+
+                // 标记 checkpoint 位置
+                [self.checkpointIndices addObject:@(self.pathPoints.count - 1)];
+            }
+        }
+    }
+
+    [self appendMinimumDistanceRetraceIfNeeded:&totalDist];
 
     self.totalPathDistance = totalDist;
     self.traveledDistance = 0;
@@ -351,6 +422,7 @@ static double const kMinimumPathDistance  = 1100.0; // 路线距离下限
 - (void)startSimulationWithCheckpoints:(NSArray<SWRunCheckpoint *> *)checkpoints
                           visitOrder:(NSArray<NSNumber *> *)optimalOrder
                         startLocation:(CLLocation *)startLocation
+                     routeCoordinates:(NSArray<NSValue *> *)routeCoordinates
                      onTick:(SWSimulatorTickBlock)tickBlock
                   onComplete:(SWSimulatorCompleteBlock)completeBlock {
 
@@ -365,6 +437,7 @@ static double const kMinimumPathDistance  = 1100.0; // 路线距离下限
     self.checkpoints = checkpoints;
     self.visitOrder  = optimalOrder;
     self.startLocation = [self locationLooksUsable:startLocation] ? startLocation : nil;
+    self.routeCoordinates = routeCoordinates;
     self.tickBlock   = tickBlock;
     self.completeBlock = completeBlock;
     self.pathIndex = 0;
@@ -428,6 +501,7 @@ static double const kMinimumPathDistance  = 1100.0; // 路线距离下限
     self.elapsedSeconds = 0;
     self.nextFloorDistance = 200.0;
     self.startLocation = nil;
+    self.routeCoordinates = nil;
     [self resetMotionData];
 }
 
