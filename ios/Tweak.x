@@ -657,7 +657,7 @@ static void SWRunCollectViewControllerRoots(UIViewController *vc, NSMutableArray
             SWRunCollectViewControllerRoots(child, roots);
         }
     }
-    for (UIViewController *child in vc.children) {
+    for (UIViewController *child in vc.childViewControllers) {
         SWRunCollectViewControllerRoots(child, roots);
     }
 }
