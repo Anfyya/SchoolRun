@@ -2,7 +2,7 @@ name: Build SWRunCheckpointHUD
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, Codex]
     paths:
       - 'ios/**'
       - '.github/workflows/build.yml'
@@ -49,6 +49,25 @@ jobs:
               ln -sf "$XCODE_SDK" "$SDK_DIR/iPhoneOS16.5.sdk" 2>/dev/null || true
             fi
           fi
+
+      - name: Provide ldid shim
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          cat > "$HOME/.local/bin/ldid" <<'SH'
+          #!/bin/sh
+          status=0
+          for arg in "$@"; do
+            case "$arg" in
+              -*) continue ;;
+            esac
+            if [ -f "$arg" ]; then
+              codesign -f -s - "$arg" || status=$?
+            fi
+          done
+          exit $status
+          SH
+          chmod +x "$HOME/.local/bin/ldid"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Build Package
         working-directory: ios

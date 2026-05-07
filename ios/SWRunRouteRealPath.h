@@ -23,6 +23,8 @@ typedef NS_ENUM(NSInteger, SWPathSource) {
     SWPathSourceStraightLine = 2 // 直线距离(无地图服务可用)
 };
 
+typedef double * _Nullable * _Nullable SWRunDistanceMatrix;
+
 /// 单段路径结果
 @interface SWPathSegment : NSObject
 
@@ -31,6 +33,7 @@ typedef NS_ENUM(NSInteger, SWPathSource) {
 @property (nonatomic, assign) SWPathSource  source;         // 数据来源
 @property (nonatomic, assign) double        duration;       // 预估时间(秒)
 @property (nonatomic, assign) BOOL          isAvailable;    // 是否获取成功
+@property (nonatomic, copy)   NSArray<NSValue *> *pathCoordinates; // 实际路径坐标
 
 @end
 
@@ -48,11 +51,16 @@ typedef NS_ENUM(NSInteger, SWPathSource) {
                          to:(CLLocationCoordinate2D)to
                  completion:(void(^)(SWPathSegment *result))completion;
 
+/// 串联多个控制点之间的真实步行路径坐标
+/// @param coordinates NSValue 包装的 CLLocationCoordinate2D 数组
+- (void)walkingRouteCoordinatesForCoordinates:(NSArray<NSValue *> *)coordinates
+                                   completion:(void(^)(NSArray<NSValue *> *routeCoordinates, SWPathSource overallSource))completion;
+
 /// 批量计算: 构建 N 个点之间的完整距离矩阵
 /// @param coordinates 坐标数组
 /// @param completion 回调，返回 N×N 距离矩阵 (上三角已填充)
 - (void)buildDistanceMatrix:(NSArray<NSValue *> *)coordinates
-                 completion:(void(^)(double **matrix, NSInteger count, SWPathSource overallSource))completion;
+                 completion:(void(^)(SWRunDistanceMatrix matrix, NSInteger count, SWPathSource overallSource))completion;
 
 /// 检查 AMap SDK 是否可用
 - (BOOL)isAMapAvailable;
