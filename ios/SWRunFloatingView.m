@@ -40,6 +40,21 @@ static CGFloat const kExpandedWidth    = 300.0;
 static CGFloat const kMaxHeight        = 400.0;
 static CGFloat const kCornerRadius     = 12.0;
 
+@interface SWRunPassthroughWindow : UIWindow
+@end
+
+@implementation SWRunPassthroughWindow
+
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hitView = [super hitTest:point withEvent:event];
+    if (hitView == self || hitView == self.rootViewController.view) {
+        return nil;
+    }
+    return hitView;
+}
+
+@end
+
 // ============================================================
 #pragma mark - SWRunFloatingView 实现
 // ============================================================
@@ -116,9 +131,9 @@ static CGFloat const kCornerRadius     = 12.0;
     }
 
     if (scene) {
-        self.overlayWindow = [[UIWindow alloc] initWithWindowScene:scene];
+        self.overlayWindow = [[SWRunPassthroughWindow alloc] initWithWindowScene:scene];
     } else {
-        self.overlayWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        self.overlayWindow = [[SWRunPassthroughWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     }
 
     self.overlayWindow.windowLevel = UIWindowLevelAlert + 100;
@@ -329,6 +344,16 @@ static CGFloat const kCornerRadius     = 12.0;
         self.distanceLabel.frame = CGRectZero;
         self.tableView.frame = CGRectZero;
     }
+}
+
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    CGPoint containerPoint = [self convertPoint:point toView:self.containerView];
+    return [self.containerView pointInside:containerPoint withEvent:event];
+}
+
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hitView = [super hitTest:point withEvent:event];
+    return hitView == self ? nil : hitView;
 }
 
 // ============================================================
