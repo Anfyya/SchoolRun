@@ -686,10 +686,8 @@ static double  const kMinimumRouteDistance = 1100.0;
 - (void)show {
     dispatch_async(dispatch_get_main_queue(), ^{
         self.overlayWindow.hidden = NO;
-        [self expandAnimated:YES];
-        // 5秒后自动收起
         [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(autoCollapse) object:nil];
-        [self performSelector:@selector(autoCollapse) withObject:nil afterDelay:5.0];
+        [self expandAnimated:YES];
     });
 }
 
@@ -704,6 +702,7 @@ static double  const kMinimumRouteDistance = 1100.0;
 
 - (void)hide {
     dispatch_async(dispatch_get_main_queue(), ^{
+        [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(autoCollapse) object:nil];
         [UIView animateWithDuration:0.2 animations:^{
             self.containerView.alpha = 0;
         } completion:^(BOOL finished) {
@@ -715,9 +714,7 @@ static double  const kMinimumRouteDistance = 1100.0;
 }
 
 - (void)autoCollapse {
-    if (self.isExpanded) {
-        [self collapseAnimated:YES];
-    }
+    // 保留方法用于取消旧版本可能已经排队的延迟调用；不再主动最小化。
 }
 
 // ============================================================
