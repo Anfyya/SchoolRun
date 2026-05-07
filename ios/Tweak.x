@@ -1862,54 +1862,13 @@ void SWRunToggleSimulation(void) {
 #pragma mark - Hook: CMPedometer (模拟步数/距离/步频/爬楼)
 // ============================================================
 
-/// 缓存的模拟计步器数据 (从 SWRunSimulator.motionData 获取)
-static CMPedometerData *gFakePedometerData = nil;
+/// 缓存系统真实回调对象，避免构造空壳 CMPedometerData。
+static CMPedometerData *gLastPedometerData = nil;
 
 static BOOL SWRunShouldSpoofMotionData(void) {
     if (!gSimActive) return NO;
     SWSimulatorState state = [SWRunSimulator sharedInstance].state;
     return state == SWSimulatorStateRunning || state == SWSimulatorStatePaused;
-}
-
-/// 生成一个假的 CMPedometerData
-static CMPedometerData *BuildFakePedometerData(NSDate *startDate, NSDate *endDate) {
-    SWRunSimulator *sim = [SWRunSimulator sharedInstance];
-    if (sim.state != SWSimulatorStateRunning && sim.state != SWSimulatorStatePaused) {
-        return gFakePedometerData;
-    }
-
-    SWSimulatedMotionData *md = sim.motionData;
-    if (!md) return gFakePedometerData;
-
-    // 用动态 API 创建 CMPedometerData (因为 init 是私有的)
-    // 使用 KVC 或创建子类来注入数据
-
-    // 实际实现: 创建一个假的数据对象
-    // CMPedometerData 是不可变的, 我们用 objc 运行时动态构建
-
-    Class pedoClass = NSClassFromString(@"CMPedometerData");
-    if (!pedoClass) return gFakePedometerData;
-
-    id fakeData = [[pedoClass alloc] init];
-    if (!fakeData) return gFakePedometerData;
-
-    // 使用 KVC 设置属性 (CMPedometerData 内部属性是私有的)
-    @try {
-        [fakeData setValue:@(md.numberOfSteps)     forKey:@"numberOfSteps"];
-        [fakeData setValue:@(md.distance)           forKey:@"distance"];
-        [fakeData setValue:(startDate ?: sim.simulationStartDate ?: [NSDate date]) forKey:@"startDate"];
-        [fakeData setValue:(endDate ?: [NSDate date]) forKey:@"endDate"];
-        [fakeData setValue:@(md.averageActivePace)  forKey:@"averageActivePace"];
-        [fakeData setValue:@(md.currentPace)        forKey:@"currentPace"];
-        [fakeData setValue:@(md.currentCadence)     forKey:@"currentCadence"];
-        [fakeData setValue:@(md.floorsAscended)     forKey:@"floorsAscended"];
-        [fakeData setValue:@(md.floorsDescended)    forKey:@"floorsDescended"];
-    } @catch (NSException *e) {
-        // KVC 失败则返回缓存
-    }
-
-    gFakePedometerData = fakeData;
-    return fakeData;
 }
 
 %hook CMPedometer
@@ -1943,14 +1902,14 @@ static CMPedometerData *BuildFakePedometerData(NSDate *startDate, NSDate *endDat
     }
 
     if (gSimActive) {
-        // 模拟模式: 存储 original handler, 由 tick 驱动
-        // 但我们无法在 %orig 之前知道 handler 内容
-        // 方案: 包装 handler
         CMPedometerHandler wrappedHandler = ^(CMPedometerData *data, NSError *error) {
+            if (data) {
+                gLastPedometerData = data;
+            }
             if (SWRunShouldSpoofMotionData()) {
-                CMPedometerData *fakeData = BuildFakePedometerData(start, [NSDate date]);
-                if (fakeData) {
-                    handler(fakeData, nil);
+                CMPedometerData *targetData = data ?: gLastPedometerData;
+                if (targetData) {
+                    handler(targetData, nil);
                 } else {
                     handler(data, error);
                 }
@@ -1971,11 +1930,19 @@ static CMPedometerData *BuildFakePedometerData(NSDate *startDate, NSDate *endDat
     if (!handler) { %orig; return; }
 
     if (SWRunShouldSpoofMotionData()) {
-        CMPedometerData *fakeData = BuildFakePedometerData(start, end);
-        if (fakeData) {
-            handler(fakeData, nil);
-            return;
-        }
+        CMPedometerHandler wrappedHandler = ^(CMPedometerData *data, NSError *error) {
+            if (data) {
+                gLastPedometerData = data;
+            }
+            CMPedometerData *targetData = data ?: gLastPedometerData;
+            if (targetData) {
+                handler(targetData, nil);
+            } else {
+                handler(data, error);
+            }
+        };
+        %orig(start, end, wrappedHandler);
+        return;
     }
     %orig;
 }
@@ -2076,19 +2043,7 @@ static CMRotationRate SWRunFakeRotationRate(void) {
     return r;
 }
 
-static CMMotionActivity *SWRunBuildFakeActivity(void) {
-    CMMotionActivity *activity = [[CMMotionActivity alloc] init];
-    @try {
-        [activity setValue:@(NO) forKey:@"stationary"];
-        [activity setValue:@(NO) forKey:@"walking"];
-        [activity setValue:@(YES) forKey:@"running"];
-        [activity setValue:@(NO) forKey:@"automotive"];
-        [activity setValue:@(NO) forKey:@"cycling"];
-        [activity setValue:@(CMMotionActivityConfidenceHigh) forKey:@"confidence"];
-        [activity setValue:([SWRunSimulator sharedInstance].simulationStartDate ?: [NSDate date]) forKey:@"startDate"];
-    } @catch (NSException *e) {}
-    return activity;
-}
+static CMMotionActivity *gLastMotionActivity = nil;
 
 %hook CMMotionManager
 
@@ -2212,27 +2167,12 @@ static CMMotionActivity *SWRunBuildFakeActivity(void) {
     if (!handler) { %orig; return; }
 
     if (gSimActive) {
-        // 创建一个假的 running activity
-        NSOperationQueue *targetQueue = queue ?: [NSOperationQueue mainQueue];
-        if (SWRunShouldSpoofMotionData()) {
-            [targetQueue addOperationWithBlock:^{
-                handler(SWRunBuildFakeActivity());
-            }];
-        }
-
         CMMotionActivityHandler wrappedHandler = ^(CMMotionActivity *activity) {
+            if (activity) {
+                gLastMotionActivity = activity;
+            }
             if (SWRunShouldSpoofMotionData()) {
-                // 尝试用 KVC 构造 running 的 activity
-                CMMotionActivity *targetActivity = activity ?: SWRunBuildFakeActivity();
-                @try {
-                    [targetActivity setValue:@(NO)  forKey:@"walking"];
-                    [targetActivity setValue:@(0.95) forKey:@"confidence"];
-                    [targetActivity setValue:@(YES) forKey:@"running"];
-                    [targetActivity setValue:@(NO)  forKey:@"automotive"];
-                    [targetActivity setValue:@(NO)  forKey:@"cycling"];
-                    [targetActivity setValue:@(NO)  forKey:@"stationary"];
-                    [targetActivity setValue:[NSDate date] forKey:@"startDate"];
-                } @catch (NSException *e) {}
+                CMMotionActivity *targetActivity = activity ?: gLastMotionActivity;
                 handler(targetActivity);
             } else {
                 handler(activity);
@@ -2250,10 +2190,10 @@ static CMMotionActivity *SWRunBuildFakeActivity(void) {
                           withHandler:(CMMotionActivityQueryHandler)handler {
     if (!handler) { %orig; return; }
 
-    if (SWRunShouldSpoofMotionData()) {
+    if (SWRunShouldSpoofMotionData() && gLastMotionActivity) {
         NSOperationQueue *targetQueue = queue ?: [NSOperationQueue mainQueue];
         [targetQueue addOperationWithBlock:^{
-            handler(@[SWRunBuildFakeActivity()], nil);
+            handler(@[gLastMotionActivity], nil);
         }];
         return;
     }
