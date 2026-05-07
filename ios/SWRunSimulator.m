@@ -35,6 +35,7 @@ static double const kLocationJitter       = 0.000003; // ~0.3m GPS 漂移
 static double const kTickInterval         = 1.0;  // 每秒一个点
 static double const kBaseAltitude         = 15.0; // 统一起跑海拔
 static double const kNominalStepLength    = 0.76; // 用于距离反推步数
+static double const kMinimumPathDistance  = 1100.0; // 路线距离下限
 
 @interface SWRunSimulator ()
 
@@ -77,6 +78,8 @@ static double const kNominalStepLength    = 0.76; // 用于距离反推步数
 - (CLLocation *)locationAtDistance:(double)distance heading:(double *)headingOut speed:(double)speed;
 - (void)updateMotionDataWithStepDistance:(double)stepDistance speed:(double)speed;
 - (double)headingFrom:(CLLocationCoordinate2D)from to:(CLLocationCoordinate2D)to;
+- (void)appendPathSegmentToLocation:(CLLocation *)endLoc totalDistance:(double *)totalDist;
+- (void)appendMinimumDistanceLoopIfNeeded:(double *)totalDist;
 
 @end
 
@@ -117,6 +120,61 @@ static double const kNominalStepLength    = 0.76; // 用于距离反推步数
 // ============================================================
 #pragma mark - 路径生成
 // ============================================================
+
+- (void)appendPathSegmentToLocation:(CLLocation *)endLoc totalDistance:(double *)totalDist {
+    if (!endLoc || self.pathPoints.count == 0 || !totalDist) return;
+
+    CLLocation *startLoc = [self.pathPoints lastObject];
+    double segmentDist = [startLoc distanceFromLocation:endLoc];
+    double segmentTime = segmentDist / self.walkingSpeed;
+    NSInteger steps = MAX(1, (NSInteger)round(segmentTime));
+
+    double startLat = startLoc.coordinate.latitude;
+    double startLng = startLoc.coordinate.longitude;
+    double endLat   = endLoc.coordinate.latitude;
+    double endLng   = endLoc.coordinate.longitude;
+
+    for (NSInteger s = 1; s <= steps; s++) {
+        double t = (double)s / (double)steps;
+        double easedT = t < 0.5 ? 2 * t * t : 1 - pow(-2 * t + 2, 2) / 2;
+        double lat = startLat + (endLat - startLat) * easedT;
+        double lng = startLng + (endLng - startLng) * easedT;
+
+        if (s < steps) {
+            lat += [self randomJitter];
+            lng += [self randomJitter];
+        }
+
+        CLLocation *loc = [self makeLocation:lat lng:lng];
+        CLLocation *prevLoc = [self.pathPoints lastObject];
+        *totalDist += [prevLoc distanceFromLocation:loc];
+        [self.pathPoints addObject:loc];
+        [self.pathCumulativeDistances addObject:@(*totalDist)];
+    }
+}
+
+- (void)appendMinimumDistanceLoopIfNeeded:(double *)totalDist {
+    if (!totalDist || *totalDist >= kMinimumPathDistance || self.pathPoints.count == 0) return;
+
+    CLLocation *lastLoc = [self.pathPoints lastObject];
+    CLLocationCoordinate2D base = lastLoc.coordinate;
+    double deficit = kMinimumPathDistance - *totalDist;
+    double side = deficit / 4.0;
+    double latMeters = 111111.0;
+    double lonMeters = 111111.0 * MAX(0.2, cos(base.latitude * M_PI / 180.0));
+
+    CLLocationCoordinate2D p1 = CLLocationCoordinate2DMake(base.latitude,
+                                                           base.longitude + side / lonMeters);
+    CLLocationCoordinate2D p2 = CLLocationCoordinate2DMake(base.latitude + side / latMeters,
+                                                           base.longitude + side / lonMeters);
+    CLLocationCoordinate2D p3 = CLLocationCoordinate2DMake(base.latitude + side / latMeters,
+                                                           base.longitude);
+
+    [self appendPathSegmentToLocation:[self makeLocation:p1.latitude lng:p1.longitude] totalDistance:totalDist];
+    [self appendPathSegmentToLocation:[self makeLocation:p2.latitude lng:p2.longitude] totalDistance:totalDist];
+    [self appendPathSegmentToLocation:[self makeLocation:p3.latitude lng:p3.longitude] totalDistance:totalDist];
+    [self appendPathSegmentToLocation:[self makeLocation:base.latitude lng:base.longitude] totalDistance:totalDist];
+}
 
 /// 根据检查点和访问顺序生成完整路径点序列
 - (void)generatePathPoints {
@@ -182,6 +240,8 @@ static double const kNominalStepLength    = 0.76; // 用于距离反推步数
             [self.checkpointIndices addObject:@(self.pathPoints.count - 1)];
         }
     }
+
+    [self appendMinimumDistanceLoopIfNeeded:&totalDist];
 
     self.totalPathDistance = totalDist;
     self.traveledDistance = 0;

@@ -69,8 +69,11 @@
                             checkpoints:(NSArray<SWRunCheckpoint *> *)checkpoints
                            fromLatitude:(double)startLat
                           fromLongitude:(double)startLng;
+- (void)applyMinimumDistanceFloorToPlan:(SWRunRoutePlan *)plan speed:(double)speed;
 
 @end
+
+static double const kSWRunMinimumRouteDistance = 1100.0;
 
 static BOOL SWRunHasRouteStart(double lat, double lng) {
     return !(lat == 0 && lng == 0);
@@ -215,6 +218,7 @@ static BOOL SWRunHasRouteStart(double lat, double lng) {
     plan.optimalOrder = fixedOnly;
     plan.optimalDistance = totalDist;
     plan.segmentDistances = segments;
+    [self applyMinimumDistanceFloorToPlan:plan speed:2.5];
 
     return plan;
 }
@@ -307,6 +311,7 @@ static BOOL SWRunHasRouteStart(double lat, double lng) {
 
         // 修正速度: 真实步行约 1.4 m/s
         double speed = plan.usesRealPath ? 1.4 : 2.5;
+        [self applyMinimumDistanceFloorToPlan:plan speed:speed];
         plan.savedDistance = plan.originalDistance - plan.optimalDistance;
         if (plan.savedDistance < 0) plan.savedDistance = 0;
         plan.estimatedMinutes = plan.optimalDistance / speed / 60.0;
@@ -629,6 +634,8 @@ static BOOL SWRunHasRouteStart(double lat, double lng) {
         checkpoints:(NSArray<SWRunCheckpoint *> *)checkpoints
                   m:(NSInteger)m {
 
+    [self applyMinimumDistanceFloorToPlan:plan speed:2.5];
+
     // 节省距离
     plan.savedDistance = plan.originalDistance - plan.optimalDistance;
     if (plan.savedDistance < 0) plan.savedDistance = 0;
@@ -646,6 +653,24 @@ static BOOL SWRunHasRouteStart(double lat, double lng) {
             plan.nextTargetIndex = idx;
             break;
         }
+    }
+}
+
+- (void)applyMinimumDistanceFloorToPlan:(SWRunRoutePlan *)plan speed:(double)speed {
+    if (!plan || plan.optimalDistance >= kSWRunMinimumRouteDistance) return;
+
+    plan.optimalDistance = kSWRunMinimumRouteDistance;
+    if (plan.originalDistance > 0 && plan.originalDistance < kSWRunMinimumRouteDistance) {
+        plan.originalDistance = kSWRunMinimumRouteDistance;
+    }
+    if (speed > 0) {
+        plan.estimatedMinutes = plan.optimalDistance / speed / 60.0;
+    }
+
+    if (plan.dataSourceDesc.length == 0) {
+        plan.dataSourceDesc = @"路线已补足至 1.10km";
+    } else if (![plan.dataSourceDesc containsString:@"1.10km"]) {
+        plan.dataSourceDesc = [plan.dataSourceDesc stringByAppendingString:@" · 已补足至 1.10km"];
     }
 }
 

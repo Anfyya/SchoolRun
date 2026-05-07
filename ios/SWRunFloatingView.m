@@ -8,6 +8,9 @@
 #import "SWRunFloatingView.h"
 #import "SWRunRoutePlanner.h"
 #import "SWRunSimulator.h"
+#import <MapKit/MapKit.h>
+#import <math.h>
+#import <stdlib.h>
 
 // ★ 引用 Tweak.x 中的模拟控制函数
 extern void SWRunStartGPSSimulation(void);
@@ -38,8 +41,10 @@ static CGFloat const kRowHeight        = 42.0;
 static CGFloat const kCollapsedWidth   = 56.0;
 static CGFloat const kCollapsedHeight  = 56.0;
 static CGFloat const kExpandedWidth    = 300.0;
-static CGFloat const kMaxHeight        = 400.0;
+static CGFloat const kMaxHeight        = 560.0;
+static CGFloat const kMapHeight        = 140.0;
 static CGFloat const kCornerRadius     = 12.0;
+static double  const kMinimumRouteDistance = 1100.0;
 
 @interface SWRunPassthroughWindow : UIWindow
 @end
@@ -59,7 +64,7 @@ static CGFloat const kCornerRadius     = 12.0;
 // ============================================================
 #pragma mark - SWRunFloatingView 实现
 // ============================================================
-@interface SWRunFloatingView () <UITableViewDataSource, UITableViewDelegate>
+@interface SWRunFloatingView () <UITableViewDataSource, UITableViewDelegate, MKMapViewDelegate>
 
 @property (nonatomic, strong) UIWindow           *overlayWindow;
 @property (nonatomic, strong) UIView             *containerView;
@@ -71,6 +76,7 @@ static CGFloat const kCornerRadius     = 12.0;
 @property (nonatomic, strong) UIButton           *parseBtn;          // 主动解析点位
 @property (nonatomic, strong) UIButton           *simBtn;            // ★ 模拟按钮
 @property (nonatomic, strong) UIButton           *simStopBtn;        // ★ 停止按钮
+@property (nonatomic, strong) MKMapView          *routeMapView;      // 路线小地图
 @property (nonatomic, strong) UITableView        *tableView;
 @property (nonatomic, strong) UIPanGestureRecognizer *panGesture;
 
@@ -80,6 +86,7 @@ static CGFloat const kCornerRadius     = 12.0;
 @property (nonatomic, assign) BOOL                isSimRunning;      // ★ 模拟状态
 @property (nonatomic, assign) CGPoint             dragStartPoint;
 @property (nonatomic, strong) SWRunRoutePlan     *currentPlan;       // 当前路线规划
+@property (nonatomic, strong) MKPolyline         *routePolyline;
 
 @end
 
@@ -108,6 +115,7 @@ static CGFloat const kCornerRadius     = 12.0;
         [self setupOverlayWindow];
         [self setupContainerView];
         [self setupHeader];
+        [self setupMapView];
         [self setupTableView];
         [self setupGestures];
         [self collapseAnimated:NO];
@@ -241,6 +249,24 @@ static CGFloat const kCornerRadius     = 12.0;
     // 已合并到 setupHeader
 }
 
+- (void)setupMapView {
+    self.routeMapView = [[MKMapView alloc] initWithFrame:CGRectZero];
+    self.routeMapView.delegate = self;
+    self.routeMapView.mapType = MKMapTypeStandard;
+    self.routeMapView.scrollEnabled = NO;
+    self.routeMapView.zoomEnabled = NO;
+    self.routeMapView.rotateEnabled = NO;
+    self.routeMapView.pitchEnabled = NO;
+    self.routeMapView.showsCompass = NO;
+    self.routeMapView.showsScale = NO;
+    self.routeMapView.showsUserLocation = NO;
+    self.routeMapView.userInteractionEnabled = NO;
+    self.routeMapView.layer.cornerRadius = 8.0;
+    self.routeMapView.clipsToBounds = YES;
+    self.routeMapView.hidden = YES;
+    [self.containerView addSubview:self.routeMapView];
+}
+
 - (void)setupTableView {
     self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
     self.tableView.backgroundColor = [UIColor clearColor];
@@ -261,6 +287,148 @@ static CGFloat const kCornerRadius     = 12.0;
 }
 
 // ============================================================
+#pragma mark - 路线小地图
+// ============================================================
+- (CLLocationCoordinate2D)coordinateFrom:(CLLocationCoordinate2D)coord
+                              eastMeters:(double)eastMeters
+                             northMeters:(double)northMeters {
+    double latDelta = northMeters / 111111.0;
+    double lonScale = MAX(0.2, cos(coord.latitude * M_PI / 180.0));
+    double lonDelta = eastMeters / (111111.0 * lonScale);
+    return CLLocationCoordinate2DMake(coord.latitude + latDelta, coord.longitude + lonDelta);
+}
+
+- (double)distanceForCoordinates:(NSArray<NSValue *> *)coords {
+    if (coords.count < 2) return 0;
+
+    double total = 0;
+    CLLocationCoordinate2D prev;
+    [coords[0] getValue:&prev];
+    CLLocation *prevLoc = [[CLLocation alloc] initWithLatitude:prev.latitude longitude:prev.longitude];
+
+    for (NSInteger i = 1; i < coords.count; i++) {
+        CLLocationCoordinate2D coord;
+        [coords[i] getValue:&coord];
+        CLLocation *loc = [[CLLocation alloc] initWithLatitude:coord.latitude longitude:coord.longitude];
+        total += [prevLoc distanceFromLocation:loc];
+        prevLoc = loc;
+    }
+    return total;
+}
+
+- (NSArray<NSValue *> *)routeCoordinatesForMap {
+    if (self.checkpoints.count < 2) return @[];
+
+    NSArray<NSNumber *> *order = self.currentPlan.optimalOrder.count > 0
+        ? self.currentPlan.optimalOrder
+        : nil;
+    if (!order) {
+        NSMutableArray<NSNumber *> *fallbackOrder = [NSMutableArray arrayWithCapacity:self.checkpoints.count];
+        for (NSInteger i = 0; i < self.checkpoints.count; i++) {
+            [fallbackOrder addObject:@(i)];
+        }
+        order = fallbackOrder;
+    }
+
+    NSMutableArray<NSValue *> *coords = [NSMutableArray array];
+    for (NSNumber *idxNum in order) {
+        NSInteger idx = [idxNum integerValue];
+        if (idx < 0 || idx >= self.checkpoints.count) continue;
+        SWRunCheckpoint *cp = self.checkpoints[idx];
+        CLLocationCoordinate2D coord = CLLocationCoordinate2DMake(cp.latitude, cp.longitude);
+        if (fabs(coord.latitude) < 0.000001 || fabs(coord.longitude) < 0.000001) continue;
+        [coords addObject:[NSValue valueWithMKCoordinate:coord]];
+    }
+
+    double routeDistance = [self distanceForCoordinates:coords];
+    if (coords.count > 0 && routeDistance < kMinimumRouteDistance) {
+        CLLocationCoordinate2D last;
+        [[coords lastObject] getValue:&last];
+
+        double side = (kMinimumRouteDistance - routeDistance) / 4.0;
+        CLLocationCoordinate2D p1 = [self coordinateFrom:last eastMeters:side northMeters:0];
+        CLLocationCoordinate2D p2 = [self coordinateFrom:last eastMeters:side northMeters:side];
+        CLLocationCoordinate2D p3 = [self coordinateFrom:last eastMeters:0 northMeters:side];
+        [coords addObject:[NSValue valueWithMKCoordinate:p1]];
+        [coords addObject:[NSValue valueWithMKCoordinate:p2]];
+        [coords addObject:[NSValue valueWithMKCoordinate:p3]];
+        [coords addObject:[NSValue valueWithMKCoordinate:last]];
+    }
+
+    return coords;
+}
+
+- (void)refreshRouteMap {
+    if (!self.routeMapView) return;
+
+    [self.routeMapView removeOverlays:self.routeMapView.overlays];
+    [self.routeMapView removeAnnotations:self.routeMapView.annotations];
+
+    NSArray<NSValue *> *coords = [self routeCoordinatesForMap];
+    if (coords.count < 2) {
+        self.routeMapView.hidden = YES;
+        return;
+    }
+
+    CLLocationCoordinate2D *polyCoords = (CLLocationCoordinate2D *)calloc(coords.count, sizeof(CLLocationCoordinate2D));
+    if (!polyCoords) {
+        self.routeMapView.hidden = YES;
+        return;
+    }
+    for (NSInteger i = 0; i < coords.count; i++) {
+        [coords[i] getValue:&polyCoords[i]];
+    }
+
+    self.routePolyline = [MKPolyline polylineWithCoordinates:polyCoords count:coords.count];
+    free(polyCoords);
+    [self.routeMapView addOverlay:self.routePolyline];
+
+    for (NSInteger i = 0; i < self.checkpoints.count; i++) {
+        SWRunCheckpoint *cp = self.checkpoints[i];
+        if (fabs(cp.latitude) < 0.000001 || fabs(cp.longitude) < 0.000001) continue;
+        MKPointAnnotation *annotation = [[MKPointAnnotation alloc] init];
+        annotation.coordinate = CLLocationCoordinate2DMake(cp.latitude, cp.longitude);
+        annotation.title = cp.pointName.length > 0 ? cp.pointName : [NSString stringWithFormat:@"P%ld", (long)(i + 1)];
+        [self.routeMapView addAnnotation:annotation];
+    }
+
+    MKMapRect mapRect = self.routePolyline.boundingMapRect;
+    if (!MKMapRectIsNull(mapRect) && !MKMapRectIsEmpty(mapRect)) {
+        [self.routeMapView setVisibleMapRect:mapRect
+                                 edgePadding:UIEdgeInsetsMake(14, 14, 14, 14)
+                                    animated:NO];
+    }
+    self.routeMapView.hidden = NO;
+}
+
+- (MKOverlayRenderer *)mapView:(MKMapView *)mapView rendererForOverlay:(id<MKOverlay>)overlay {
+    if ([overlay isKindOfClass:[MKPolyline class]]) {
+        MKPolylineRenderer *renderer = [[MKPolylineRenderer alloc] initWithPolyline:(MKPolyline *)overlay];
+        renderer.strokeColor = [UIColor colorWithRed:0.1 green:0.55 blue:1.0 alpha:0.95];
+        renderer.lineWidth = 4.0;
+        renderer.lineJoin = kCGLineJoinRound;
+        renderer.lineCap = kCGLineCapRound;
+        return renderer;
+    }
+    return [[MKOverlayRenderer alloc] initWithOverlay:overlay];
+}
+
+- (MKAnnotationView *)mapView:(MKMapView *)mapView viewForAnnotation:(id<MKAnnotation>)annotation {
+    static NSString *identifier = @"SWRunPointAnnotation";
+    MKMarkerAnnotationView *view = (MKMarkerAnnotationView *)[mapView dequeueReusableAnnotationViewWithIdentifier:identifier];
+    if (!view) {
+        view = [[MKMarkerAnnotationView alloc] initWithAnnotation:annotation reuseIdentifier:identifier];
+        view.canShowCallout = NO;
+    } else {
+        view.annotation = annotation;
+    }
+    view.markerTintColor = [UIColor colorWithRed:1.0 green:0.25 blue:0.25 alpha:1.0];
+    view.glyphTintColor = [UIColor whiteColor];
+    view.glyphText = @"";
+    return view;
+}
+
+// ============================================================
 #pragma mark - 布局
 // ============================================================
 - (void)layoutSubviews {
@@ -269,15 +437,20 @@ static CGFloat const kCornerRadius     = 12.0;
     if (self.isExpanded) {
         self.frame = self.superview.bounds;
 
+        CGFloat yPos = 80;
+        CGFloat maxPanelHeight = MIN(kMaxHeight, self.superview.bounds.size.height - yPos - 20);
+
         // 路线摘要高度
         CGFloat routeInfoH = 0;
         if (self.currentPlan && self.currentPlan.optimalOrder.count > 0) {
             routeInfoH = 52; // 约3行文本高度
         }
 
-        CGFloat tableHeight = MIN(self.checkpoints.count * kRowHeight, kMaxHeight - kHeaderHeight - routeInfoH);
-        CGFloat totalHeight = kHeaderHeight + routeInfoH + tableHeight;
-        CGFloat yPos = 80;
+        CGFloat mapH = self.checkpoints.count >= 2 ? kMapHeight : 0;
+        CGFloat simStatusH = self.isSimRunning ? 16 : 0;
+        CGFloat tableMaxHeight = MAX(0, maxPanelHeight - kHeaderHeight - routeInfoH - mapH - simStatusH);
+        CGFloat tableHeight = MIN(self.checkpoints.count * kRowHeight, tableMaxHeight);
+        CGFloat totalHeight = kHeaderHeight + routeInfoH + mapH + simStatusH + tableHeight;
 
         self.containerView.frame = CGRectMake(10, yPos, kExpandedWidth, totalHeight);
         self.containerView.layer.cornerRadius = kCornerRadius;
@@ -305,10 +478,18 @@ static CGFloat const kCornerRadius     = 12.0;
             self.routeInfoLabel.hidden = YES;
         }
 
+        CGFloat mapY = kHeaderHeight + routeInfoH;
+        if (mapH > 0) {
+            self.routeMapView.frame = CGRectMake(8, mapY + 6, kExpandedWidth - 16, mapH - 10);
+            self.routeMapView.hidden = NO;
+        } else {
+            self.routeMapView.frame = CGRectZero;
+            self.routeMapView.hidden = YES;
+        }
+
         // Sim Status
-        CGFloat simStatusH = self.isSimRunning ? 16 : 0;
         if (simStatusH > 0) {
-            self.simStatusLabel.frame = CGRectMake(8, kHeaderHeight + routeInfoH, kExpandedWidth - 16, simStatusH);
+            self.simStatusLabel.frame = CGRectMake(8, kHeaderHeight + routeInfoH + mapH, kExpandedWidth - 16, simStatusH);
             self.simStatusLabel.hidden = NO;
         } else {
             self.simStatusLabel.frame = CGRectZero;
@@ -316,7 +497,7 @@ static CGFloat const kCornerRadius     = 12.0;
         }
 
         // Table
-        CGFloat tableY = kHeaderHeight + routeInfoH + simStatusH;
+        CGFloat tableY = kHeaderHeight + routeInfoH + mapH + simStatusH;
         self.tableView.frame = CGRectMake(0, tableY, kExpandedWidth, tableHeight);
     } else {
         // 收起状态：悬浮小圆点
@@ -340,6 +521,7 @@ static CGFloat const kCornerRadius     = 12.0;
         self.simStopBtn.hidden = YES;
         self.simStatusLabel.hidden = YES;
         self.routeInfoLabel.hidden = YES;
+        self.routeMapView.hidden = YES;
         self.toggleBtn.frame = self.containerView.bounds;
         self.toggleBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
         self.titleLabel.frame = CGRectZero;
@@ -463,6 +645,8 @@ static CGFloat const kCornerRadius     = 12.0;
                                 (long)passedFixed, (long)fixedCount];
 
         [self.tableView reloadData];
+        [self refreshRouteMap];
+        [self setNeedsLayout];
 
         // 有数据时自动弹出
         if (checkpoints.count > 0 && !self.isExpanded) {
@@ -552,6 +736,7 @@ static CGFloat const kCornerRadius     = 12.0;
 
         self.routeInfoLabel.attributedText = attr;
         self.routeInfoLabel.hidden = NO;
+        [self refreshRouteMap];
 
         // 刷新布局
         [self setNeedsLayout];
