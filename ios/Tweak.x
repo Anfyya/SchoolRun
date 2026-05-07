@@ -2072,65 +2072,41 @@ static CMMotionActivity *SWRunBuildFakeActivity(void) {
     return activity;
 }
 
-static CMAccelerometerData *SWRunBuildFakeAccelerometerData(void) {
-    Class cls = NSClassFromString(@"CMAccelerometerData");
-    return cls ? [[cls alloc] init] : nil;
-}
-
-static CMGyroData *SWRunBuildFakeGyroData(void) {
-    Class cls = NSClassFromString(@"CMGyroData");
-    return cls ? [[cls alloc] init] : nil;
-}
-
-static CMDeviceMotion *SWRunBuildFakeDeviceMotion(void) {
-    Class cls = NSClassFromString(@"CMDeviceMotion");
-    return cls ? [[cls alloc] init] : nil;
-}
-
 %hook CMMotionManager
 
 - (BOOL)isAccelerometerAvailable {
-    if (gSimActive) return YES;
     return %orig;
 }
 
 - (BOOL)isGyroAvailable {
-    if (gSimActive) return YES;
     return %orig;
 }
 
 - (BOOL)isDeviceMotionAvailable {
-    if (gSimActive) return YES;
     return %orig;
 }
 
 - (BOOL)isAccelerometerActive {
-    if (gSimActive) return YES;
     return %orig;
 }
 
 - (BOOL)isGyroActive {
-    if (gSimActive) return YES;
     return %orig;
 }
 
 - (BOOL)isDeviceMotionActive {
-    if (gSimActive) return YES;
     return %orig;
 }
 
 - (CMAccelerometerData *)accelerometerData {
-    if (gSimActive) return SWRunBuildFakeAccelerometerData();
     return %orig;
 }
 
 - (CMGyroData *)gyroData {
-    if (gSimActive) return SWRunBuildFakeGyroData();
     return %orig;
 }
 
 - (CMDeviceMotion *)deviceMotion {
-    if (gSimActive) return SWRunBuildFakeDeviceMotion();
     return %orig;
 }
 
@@ -2151,37 +2127,16 @@ static CMDeviceMotion *SWRunBuildFakeDeviceMotion(void) {
 
 - (void)startAccelerometerUpdatesToQueue:(NSOperationQueue *)queue
                              withHandler:(CMAccelerometerHandler)handler {
-    if (gSimActive && handler) {
-        CMAccelerometerHandler wrapped = ^(CMAccelerometerData *data, NSError *error) {
-            handler(data, nil);
-        };
-        %orig(queue, wrapped);
-        return;
-    }
     %orig;
 }
 
 - (void)startGyroUpdatesToQueue:(NSOperationQueue *)queue
                     withHandler:(CMGyroHandler)handler {
-    if (gSimActive && handler) {
-        CMGyroHandler wrapped = ^(CMGyroData *data, NSError *error) {
-            handler(data, nil);
-        };
-        %orig(queue, wrapped);
-        return;
-    }
     %orig;
 }
 
 - (void)startDeviceMotionUpdatesToQueue:(NSOperationQueue *)queue
                             withHandler:(CMDeviceMotionHandler)handler {
-    if (gSimActive && handler) {
-        CMDeviceMotionHandler wrapped = ^(CMDeviceMotion *motion, NSError *error) {
-            handler(motion, nil);
-        };
-        %orig(queue, wrapped);
-        return;
-    }
     %orig;
 }
 
