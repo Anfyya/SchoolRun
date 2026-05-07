@@ -106,16 +106,87 @@ static BOOL SWRunBoolFromObject(id value) {
     return NO;
 }
 
+static NSArray<NSString *> *SWRunLatitudeKeys(void) {
+    return @[@"lat", @"glat", @"gLat", @"flat", @"glocLat", @"latitude"];
+}
+
+static NSArray<NSString *> *SWRunLongitudeKeys(void) {
+    return @[@"lon", @"lng", @"glon", @"gLng", @"glng", @"gLon", @"flng", @"glocLon", @"longitude"];
+}
+
+static BOOL SWRunCoordinateLooksValid(double lat, double lon) {
+    return fabs(lat) >= 0.000001 && fabs(lon) >= 0.000001;
+}
+
+static BOOL SWRunCoordinateFromValue(id value, double *lat, double *lon) {
+    if (!value || value == [NSNull null]) return NO;
+
+    if ([value isKindOfClass:[CLLocation class]]) {
+        CLLocationCoordinate2D coord = [(CLLocation *)value coordinate];
+        if (SWRunCoordinateLooksValid(coord.latitude, coord.longitude)) {
+            if (lat) *lat = coord.latitude;
+            if (lon) *lon = coord.longitude;
+            return YES;
+        }
+    }
+
+    if ([value isKindOfClass:[NSValue class]]) {
+        const char *type = [(NSValue *)value objCType];
+        if (type && (strcmp(type, @encode(CLLocationCoordinate2D)) == 0 ||
+                     strstr(type, "CLLocationCoordinate2D"))) {
+            CLLocationCoordinate2D coord;
+            [(NSValue *)value getValue:&coord];
+            if (SWRunCoordinateLooksValid(coord.latitude, coord.longitude)) {
+                if (lat) *lat = coord.latitude;
+                if (lon) *lon = coord.longitude;
+                return YES;
+            }
+        }
+    }
+
+    id latObj = SWRunValueForKeysFromObject(value, SWRunLatitudeKeys());
+    id lonObj = SWRunValueForKeysFromObject(value, SWRunLongitudeKeys());
+    if (latObj && lonObj) {
+        double parsedLat = SWRunDoubleFromObject(latObj);
+        double parsedLon = SWRunDoubleFromObject(lonObj);
+        if (SWRunCoordinateLooksValid(parsedLat, parsedLon)) {
+            if (lat) *lat = parsedLat;
+            if (lon) *lon = parsedLon;
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
+static BOOL SWRunCoordinateFromObject(id object, double *lat, double *lon) {
+    if (SWRunCoordinateFromValue(object, lat, lon)) return YES;
+
+    for (NSString *key in @[@"coordinate", @"location", @"point", @"center", @"userCoordinate"]) {
+        id value = SWRunSafeValueForKey(object, key);
+        if (SWRunCoordinateFromValue(value, lat, lon)) return YES;
+    }
+
+    if ([object respondsToSelector:@selector(coordinate)]) {
+        @try {
+            CLLocationCoordinate2D coord = ((CLLocationCoordinate2D (*)(id, SEL))objc_msgSend)(object, @selector(coordinate));
+            if (SWRunCoordinateLooksValid(coord.latitude, coord.longitude)) {
+                if (lat) *lat = coord.latitude;
+                if (lon) *lon = coord.longitude;
+                return YES;
+            }
+        } @catch (NSException *e) {}
+    }
+
+    return NO;
+}
+
 static BOOL SWRunDictionaryLooksLikeCheckpoint(id dict) {
     if (!dict || dict == [NSNull null]) return NO;
 
-    id latObj = SWRunValueForKeysFromObject(dict, @[@"lat", @"glat", @"gLat", @"latitude"]);
-    id lonObj = SWRunValueForKeysFromObject(dict, @[@"lon", @"lng", @"glon", @"gLng", @"longitude"]);
-    if (!latObj || !lonObj) return NO;
-
-    double lat = SWRunDoubleFromObject(latObj);
-    double lon = SWRunDoubleFromObject(lonObj);
-    if (fabs(lat) < 0.000001 || fabs(lon) < 0.000001) return NO;
+    double lat = 0;
+    double lon = 0;
+    if (!SWRunCoordinateFromObject(dict, &lat, &lon)) return NO;
 
     BOOL hasPointMetadata =
         SWRunValueForKeysFromObject(dict, @[@"isFixed", @"fixed", @"flag", @"pointType"]) != nil ||
@@ -133,15 +204,16 @@ static NSDictionary *SWRunCheckpointDictionaryFromObject(id object) {
     if ([object isKindOfClass:[NSDictionary class]]) return object;
 
     NSMutableDictionary *dict = [NSMutableDictionary dictionary];
-    id latObj = SWRunValueForKeysFromObject(object, @[@"lat", @"glat", @"gLat", @"latitude"]);
-    id lonObj = SWRunValueForKeysFromObject(object, @[@"lon", @"lng", @"glon", @"gLng", @"longitude"]);
+    double lat = 0;
+    double lon = 0;
+    SWRunCoordinateFromObject(object, &lat, &lon);
     id nameObj = SWRunValueForKeysFromObject(object, @[@"pointName", @"name", @"title", @"markerName"]);
     id fixedObj = SWRunValueForKeysFromObject(object, @[@"isFixed", @"fixed", @"flag", @"pointType"]);
     id passObj = SWRunValueForKeysFromObject(object, @[@"isPass", @"passed"]);
     id positionObj = SWRunValueForKeysFromObject(object, @[@"position", @"index", @"seq"]);
 
-    if (latObj) dict[@"lat"] = latObj;
-    if (lonObj) dict[@"lon"] = lonObj;
+    if (SWRunCoordinateLooksValid(lat, lon)) dict[@"lat"] = @(lat);
+    if (SWRunCoordinateLooksValid(lat, lon)) dict[@"lon"] = @(lon);
     if (nameObj) dict[@"pointName"] = nameObj;
     if (fixedObj) dict[@"isFixed"] = fixedObj;
     if (passObj) dict[@"isPass"] = passObj;
@@ -179,6 +251,21 @@ static id SWRunCollectionObjectAtIndex(id object, NSUInteger index) {
     } @catch (NSException *e) {
         return nil;
     }
+}
+
+static NSArray<NSDictionary *> *SWRunPointArrayFromIndexedCollection(id object) {
+    NSUInteger count = SWRunCollectionCount(object);
+    if (count == 0) return nil;
+
+    NSMutableArray<NSDictionary *> *points = [NSMutableArray array];
+    NSUInteger cappedCount = MIN(count, 300);
+    for (NSUInteger i = 0; i < cappedCount; i++) {
+        NSDictionary *pointDict = SWRunCheckpointDictionaryFromObject(SWRunCollectionObjectAtIndex(object, i));
+        if (pointDict) {
+            [points addObject:pointDict];
+        }
+    }
+    return points.count > 0 ? points : nil;
 }
 
 /// 从 JSON 对象中提取打卡点数组
@@ -240,17 +327,17 @@ static NSArray<NSDictionary *> *ExtractPointsFromJSON(id jsonObject) {
 static SWRunCheckpoint *ParseCheckpoint(NSDictionary *pointDict) {
     SWRunCheckpoint *cp = [[SWRunCheckpoint alloc] init];
 
-    cp.pointName = pointDict[@"pointName"] ?: @"未知点位";
-    cp.isFixed   = SWRunBoolFromObject(SWRunValueForKeys(pointDict, @[@"isFixed", @"fixed"]));
-    cp.isPassed  = SWRunBoolFromObject(pointDict[@"isPass"]);
+    cp.pointName = SWRunValueForKeys(pointDict, @[@"pointName", @"name", @"title", @"markerName"]) ?: @"未知点位";
+    cp.isFixed   = SWRunBoolFromObject(SWRunValueForKeys(pointDict, @[@"isFixed", @"fixed", @"flag", @"pointType"]));
+    cp.isPassed  = SWRunBoolFromObject(SWRunValueForKeys(pointDict, @[@"isPass", @"passed"]));
     cp.position  = [pointDict[@"position"] integerValue];
 
     // 坐标处理
-    id lonObj = SWRunValueForKeys(pointDict, @[@"lon", @"lng", @"glon", @"gLng", @"longitude"]);
-    id latObj = SWRunValueForKeys(pointDict, @[@"lat", @"glat", @"gLat", @"latitude"]);
-
-    cp.longitude = SWRunDoubleFromObject(lonObj);
-    cp.latitude  = SWRunDoubleFromObject(latObj);
+    double lat = 0;
+    double lon = 0;
+    SWRunCoordinateFromObject(pointDict, &lat, &lon);
+    cp.longitude = lon;
+    cp.latitude  = lat;
 
     return cp;
 }
@@ -663,6 +750,9 @@ static NSArray<NSDictionary *> *SWRunExtractPointsFromObjectGraph(id object, NSI
 
     if ([object respondsToSelector:@selector(count)] &&
         [object respondsToSelector:@selector(objectAtIndex:)]) {
+        NSArray<NSDictionary *> *indexedPoints = SWRunPointArrayFromIndexedCollection(object);
+        if (indexedPoints) return indexedPoints;
+
         NSUInteger count = MIN(SWRunCollectionCount(object), 200);
         for (NSUInteger i = 0; i < count; i++) {
             id value = SWRunCollectionObjectAtIndex(object, i);
@@ -796,9 +886,162 @@ static void SWRunTryProcessRuntimeObject(id object, NSString *source) {
     }
 }
 
+static NSMutableDictionary<NSString *, NSValue *> *gPointAccessorOriginalIMPs = nil;
+static BOOL gPointAccessorPatchInstalled = NO;
+static __thread BOOL gPointAccessorProcessing = NO;
+
+static NSString *SWRunAccessorIMPKey(Class cls, SEL sel) {
+    return [NSString stringWithFormat:@"%s:%@", class_getName(cls), NSStringFromSelector(sel)];
+}
+
+static IMP SWRunOriginalAccessorIMP(id self, SEL sel) {
+    if (!self || !gPointAccessorOriginalIMPs) return NULL;
+    Class cls = [self class];
+    while (cls) {
+        NSString *key = SWRunAccessorIMPKey(cls, sel);
+        NSValue *value = gPointAccessorOriginalIMPs[key];
+        if (value) return [value pointerValue];
+        cls = class_getSuperclass(cls);
+    }
+    return NULL;
+}
+
+static void SWRunPointObjectSetter(id self, SEL _cmd, id value) {
+    if (!gPointAccessorProcessing) {
+        gPointAccessorProcessing = YES;
+        SWRunTryProcessRuntimeObject(value, [NSString stringWithFormat:@"属性捕获 %@", NSStringFromSelector(_cmd)]);
+        gPointAccessorProcessing = NO;
+    }
+
+    IMP originalIMP = SWRunOriginalAccessorIMP(self, _cmd);
+    if (originalIMP) {
+        ((void (*)(id, SEL, id))originalIMP)(self, _cmd, value);
+    }
+}
+
+static id SWRunPointObjectGetter(id self, SEL _cmd) {
+    id value = nil;
+    IMP originalIMP = SWRunOriginalAccessorIMP(self, _cmd);
+    if (originalIMP) {
+        value = ((id (*)(id, SEL))originalIMP)(self, _cmd);
+    }
+    if (!gPointAccessorProcessing) {
+        gPointAccessorProcessing = YES;
+        SWRunTryProcessRuntimeObject(value, [NSString stringWithFormat:@"属性读取 %@", NSStringFromSelector(_cmd)]);
+        gPointAccessorProcessing = NO;
+    }
+    return value;
+}
+
+static BOOL SWRunMethodReturnsObject(Method method) {
+    if (!method || method_getNumberOfArguments(method) != 2) return NO;
+    char type[16] = {0};
+    method_getReturnType(method, type, sizeof(type));
+    return type[0] == '@';
+}
+
+static BOOL SWRunMethodTakesObject(Method method) {
+    if (!method || method_getNumberOfArguments(method) != 3) return NO;
+    char type[16] = {0};
+    method_getArgumentType(method, 2, type, sizeof(type));
+    return type[0] == '@';
+}
+
+static BOOL SWRunClassShouldPatchPointAccessors(Class cls) {
+    const char *imageName = class_getImageName(cls);
+    const char *className = class_getName(cls);
+    if (!imageName || !className) return NO;
+    if (strstr(imageName, "SWCampus.app/") == NULL) return NO;
+
+    return strstr(className, "SWRun") != NULL ||
+           strstr(className, "Sport") != NULL ||
+           strstr(className, "Point") != NULL ||
+           strstr(className, "Run") != NULL;
+}
+
+static BOOL SWRunClassDefinesInstanceMethod(Class cls, SEL sel) {
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    if (!methods) return NO;
+
+    BOOL found = NO;
+    for (unsigned int i = 0; i < count; i++) {
+        if (method_getName(methods[i]) == sel) {
+            found = YES;
+            break;
+        }
+    }
+    free(methods);
+    return found;
+}
+
+static void SWRunPatchPointAccessorMethod(Class cls, SEL sel, IMP replacement, BOOL isGetter) {
+    if (!SWRunClassDefinesInstanceMethod(cls, sel)) return;
+
+    Method method = class_getInstanceMethod(cls, sel);
+    if (isGetter) {
+        if (!SWRunMethodReturnsObject(method)) return;
+    } else {
+        if (!SWRunMethodTakesObject(method)) return;
+    }
+
+    NSString *key = SWRunAccessorIMPKey(cls, sel);
+    if (gPointAccessorOriginalIMPs[key]) return;
+
+    IMP originalIMP = method_getImplementation(method);
+    gPointAccessorOriginalIMPs[key] = [NSValue valueWithPointer:originalIMP];
+    method_setImplementation(method, replacement);
+}
+
+static void SWRunPatchPointAccessors(void) {
+    if (gPointAccessorPatchInstalled) return;
+    gPointAccessorPatchInstalled = YES;
+
+    int count = objc_getClassList(NULL, 0);
+    if (count <= 0) return;
+
+    Class *classes = (Class *)calloc((size_t)count, sizeof(Class));
+    if (!classes) return;
+    int actualCount = objc_getClassList(classes, count);
+    if (actualCount > count) actualCount = count;
+
+    gPointAccessorOriginalIMPs = [NSMutableDictionary dictionary];
+
+    NSArray<NSString *> *getterNames = @[
+        @"markPoints", @"fivePoints", @"points", @"pointsResModels",
+        @"rawData", @"destinationPoint", @"pointProcessor", @"processor",
+        @"resourceLoader", @"scoringProcessor", @"togetherProcessor",
+        @"loader", @"downloader", @"runCtl", @"runCore", @"core"
+    ];
+    NSArray<NSString *> *setterNames = @[
+        @"setMarkPoints:", @"setFivePoints:", @"setPoints:",
+        @"setPointsResModels:", @"setRawData:", @"setDestinationPoint:",
+        @"setPointProcessor:", @"setProcessor:", @"setResourceLoader:",
+        @"setScoringProcessor:", @"setTogetherProcessor:", @"setLoader:",
+        @"setDownloader:", @"setRunCtl:", @"setRunCore:", @"setCore:"
+    ];
+
+    for (int i = 0; i < actualCount; i++) {
+        Class cls = classes[i];
+        if (!SWRunClassShouldPatchPointAccessors(cls)) continue;
+
+        for (NSString *name in getterNames) {
+            SWRunPatchPointAccessorMethod(cls, NSSelectorFromString(name), (IMP)SWRunPointObjectGetter, YES);
+        }
+        for (NSString *name in setterNames) {
+            SWRunPatchPointAccessorMethod(cls, NSSelectorFromString(name), (IMP)SWRunPointObjectSetter, NO);
+        }
+    }
+
+    free(classes);
+}
+
 void SWRunForceParseCheckpoints(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSLog(@"[SWRunHUD] 🔎 手动解析点位开始");
+        NSLog(@"[SWRunHUD] 🔎 当前候选: 缓存响应=%lu 运行时对象=%lu",
+              (unsigned long)gPointCandidateResponses.count,
+              (unsigned long)gRuntimeObjectCandidates.count);
         BOOL parsed = SWRunManualParseCachedResponses();
         if (!parsed) {
             parsed = SWRunManualParseRuntimeObjects();
@@ -2289,6 +2532,7 @@ static BOOL gHUDInitialized = NO;
                 [[SWRunFloatingView sharedInstance] showCollapsed];
                 SWRunPatchAntiJailbreakSelectors();
                 SWRunPatchGPSGateSelectors();
+                SWRunPatchPointAccessors();
                 NSLog(@"[SWRunHUD] ✅ 悬浮窗系统初始化完成");
                 NSLog(@"[SWRunHUD] 📱 运动世界 校园跑点位监控已激活");
                 NSLog(@"[SWRunHUD] 🔴 必经点(isFixed=1) 将显示为红色");
@@ -2377,6 +2621,7 @@ static BOOL gHUDInitialized = NO;
             [[SWRunFloatingView sharedInstance] showCollapsed];
             SWRunPatchAntiJailbreakSelectors();
             SWRunPatchGPSGateSelectors();
+            SWRunPatchPointAccessors();
             NSLog(@"[SWRunHUD] 🔄 App 进入前台, 悬浮球已显示");
         });
     }];
