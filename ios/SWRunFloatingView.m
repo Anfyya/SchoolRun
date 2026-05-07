@@ -753,9 +753,9 @@ static double  const kMinimumRouteDistance = 1100.0;
         [self rebuildRealRouteMapPath];
         [self setNeedsLayout];
 
-        // 有数据时自动弹出
-        if (checkpoints.count > 0 && !self.isExpanded) {
-            [self show];
+        // 点位刷新只保证悬浮窗可见，避免页面切换时反复强制展开造成闪烁。
+        if (checkpoints.count > 0 && self.overlayWindow.hidden) {
+            [self showCollapsed];
         }
     });
 }

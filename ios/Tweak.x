@@ -1383,19 +1383,94 @@ static void SWRunRememberPreflightLocation(CLLocation *loc) {
     }
 }
 
+static NSTimeInterval SWRunLocationAge(CLLocation *loc) {
+    NSDate *timestamp = loc.timestamp;
+    if (!timestamp) return 999999.0;
+    NSTimeInterval age = fabs([timestamp timeIntervalSinceNow]);
+    return isfinite(age) ? age : 999999.0;
+}
+
+static BOOL SWRunLocationIsFresh(CLLocation *loc) {
+    if (!loc || !SWRunCoordinateLooksUsable(loc.coordinate)) return NO;
+    CLLocationAccuracy accuracy = loc.horizontalAccuracy;
+    if (accuracy < 0 || accuracy > 120.0) return NO;
+    return SWRunLocationAge(loc) <= 20.0;
+}
+
+static CLLocation *SWRunBetterRealLocation(CLLocation *candidate, CLLocation *currentBest) {
+    if (!candidate || !SWRunCoordinateLooksUsable(candidate.coordinate)) return currentBest;
+    if (!currentBest || !SWRunCoordinateLooksUsable(currentBest.coordinate)) return candidate;
+
+    BOOL candidateFresh = SWRunLocationIsFresh(candidate);
+    BOOL bestFresh = SWRunLocationIsFresh(currentBest);
+    if (candidateFresh != bestFresh) return candidateFresh ? candidate : currentBest;
+
+    NSTimeInterval candidateAge = SWRunLocationAge(candidate);
+    NSTimeInterval bestAge = SWRunLocationAge(currentBest);
+    CLLocationAccuracy candidateAccuracy = candidate.horizontalAccuracy;
+    CLLocationAccuracy bestAccuracy = currentBest.horizontalAccuracy;
+    BOOL candidateHasAccuracy = candidateAccuracy >= 0;
+    BOOL bestHasAccuracy = bestAccuracy >= 0;
+
+    if (candidateHasAccuracy != bestHasAccuracy) return candidateHasAccuracy ? candidate : currentBest;
+    if (candidateHasAccuracy && fabs(candidateAccuracy - bestAccuracy) > 10.0) {
+        return candidateAccuracy < bestAccuracy ? candidate : currentBest;
+    }
+    if (fabs(candidateAge - bestAge) > 5.0) return candidateAge < bestAge ? candidate : currentBest;
+    if (candidateHasAccuracy && candidateAccuracy < bestAccuracy) return candidate;
+    return currentBest;
+}
+
+static CLLocation *SWRunLocationFromProvider(id provider) {
+    if (!provider) return nil;
+
+    CLLocation *best = nil;
+    NSArray<NSString *> *selectors = @[@"location", @"currentLocation"];
+    for (NSString *selectorName in selectors) {
+        SEL selector = NSSelectorFromString(selectorName);
+        if (![provider respondsToSelector:selector]) continue;
+
+        @try {
+            id value = ((id(*)(id, SEL))objc_msgSend)(provider, selector);
+            if ([value isKindOfClass:[CLLocation class]]) {
+                best = SWRunBetterRealLocation((CLLocation *)value, best);
+            }
+        } @catch (NSException *e) {}
+    }
+    return best;
+}
+
 static CLLocation *SWRunCurrentRealStartLocation(void) {
-    if (gPreflightLocation && SWRunCoordinateLooksUsable(gPreflightLocation.coordinate)) {
-        return gPreflightLocation;
+    SWRunEnsureLocationContainers();
+
+    CLLocation *best = nil;
+    for (CLLocationManager *mgr in gLocationManagers) {
+        best = SWRunBetterRealLocation([mgr location], best);
+    }
+    for (id mgr in gAMapLocationManagers) {
+        best = SWRunBetterRealLocation(SWRunLocationFromProvider(mgr), best);
     }
 
-    SWRunEnsureLocationContainers();
-    for (CLLocationManager *mgr in gLocationManagers) {
-        CLLocation *loc = [mgr location];
-        CLLocation *strongLoc = SWRunBuildStrongGPSLocation(loc);
-        if (strongLoc) {
-            gPreflightLocation = strongLoc;
-            return strongLoc;
-        }
+    if (gPreflightLocation) {
+        best = SWRunBetterRealLocation(gPreflightLocation, best);
+    }
+
+    if (best && SWRunLocationAge(best) > 45.0) {
+        NSLog(@"[SWRunHUD] 真实起点候选已过期: age=%.1fs acc=%.1fm",
+              SWRunLocationAge(best),
+              best.horizontalAccuracy);
+        return nil;
+    }
+
+    CLLocation *strongLoc = SWRunBuildStrongGPSLocation(best);
+    if (strongLoc) {
+        gPreflightLocation = strongLoc;
+        NSLog(@"[SWRunHUD] 真实起点候选: %.6f, %.6f age=%.1fs acc=%.1fm",
+              best.coordinate.latitude,
+              best.coordinate.longitude,
+              SWRunLocationAge(best),
+              best.horizontalAccuracy);
+        return strongLoc;
     }
     return nil;
 }
@@ -1519,16 +1594,23 @@ void SWRunStartGPSSimulation(void) {
               realStartLocation.coordinate.latitude,
               realStartLocation.coordinate.longitude);
     } else {
-        NSLog(@"[SWRunHUD] ⚠️ 未取得真实当前位置, 将从路线首点开始");
+        NSLog(@"[SWRunHUD] ⚠️ 未取得真实当前位置, 已取消模拟启动");
+        [hud updateSimulationStatus:@"未取得真实当前位置，请等定位稳定后重试" location:nil];
+        return;
     }
 
     NSArray<NSValue *> *routeControls = SWRunBuildRouteControls(hud, plan, realStartLocation);
     gSimStarting = YES;
+    gSimLocation = SWRunBuildStrongGPSLocation(realStartLocation) ?: realStartLocation;
+    gSimActive = YES;
     [hud updateSimulationStatus:@"正在获取真实步行路线..." location:realStartLocation];
+    [hud setSimulationRunning:YES];
+    SWRunDeliverLocationToDelegates(gSimLocation);
+    SWRunDeliverHeadingToDelegates();
 
     [[SWRunRouteRealPath sharedInstance] walkingRouteCoordinatesForCoordinates:routeControls
                                                                     completion:^(NSArray<NSValue *> *routeCoordinates, SWPathSource routeSource) {
-        if (!gSimStarting || gSimActive) return;
+        if (!gSimStarting) return;
         gSimStarting = NO;
         NSLog(@"[SWRunHUD] 🛤 真实路线坐标已准备: %lu 个点, 来源=%ld",
               (unsigned long)routeCoordinates.count, (long)routeSource);
@@ -1538,7 +1620,7 @@ void SWRunStartGPSSimulation(void) {
         [[SWRunSimulator sharedInstance]
         startSimulationWithCheckpoints:[hud valueForKey:@"checkpoints"]
                           visitOrder:plan.optimalOrder
-                        startLocation:realStartLocation
+                        startLocation:gSimLocation ?: realStartLocation
                      routeCoordinates:simRouteCoordinates
                      onTick:^(CLLocation *loc, NSInteger step) {
         gSimLocation = SWRunBuildStrongGPSLocation(loc) ?: loc;
@@ -1646,7 +1728,8 @@ void SWRunToggleSimulation(void) {
 
     CLLocation *loc = %orig;
     SWRunRememberPreflightLocation(loc);
-    return gPreflightLocation ?: loc;
+    if (loc) return loc;
+    return SWRunLocationIsFresh(gPreflightLocation) ? gPreflightLocation : nil;
 }
 
 - (void)startUpdatingLocation {
@@ -1658,7 +1741,7 @@ void SWRunToggleSimulation(void) {
     }
     %orig;
 
-    if (!gSimActive && gPreflightLocation) {
+    if (!gSimActive && SWRunLocationIsFresh(gPreflightLocation)) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
                       dispatch_get_main_queue(), ^{
             SWRunDeliverLocationToDelegates(gPreflightLocation);
@@ -1672,7 +1755,7 @@ void SWRunToggleSimulation(void) {
         SWRunDeliverLocationToDelegates(gSimLocation);
         return;
     }
-    if (gPreflightLocation) {
+    if (SWRunLocationIsFresh(gPreflightLocation)) {
         SWRunDeliverLocationToDelegates(gPreflightLocation);
     }
     %orig;
@@ -1701,53 +1784,44 @@ void SWRunToggleSimulation(void) {
 %hook CLLocation
 
 - (CLLocationCoordinate2D)coordinate {
-    if (gSimActive && gSimLocation && self != gSimLocation) return gSimLocation.coordinate;
     return %orig;
 }
 
 - (CLLocationDistance)altitude {
-    if (gSimActive && gSimLocation && self != gSimLocation) return gSimLocation.altitude;
     return %orig;
 }
 
 - (CLLocationAccuracy)horizontalAccuracy {
-    if (gSimActive && gSimLocation && self != gSimLocation) return gSimLocation.horizontalAccuracy;
     CLLocationAccuracy accuracy = %orig;
     if (accuracy < 0) return accuracy;
     return MIN(accuracy, 4.0);
 }
 
 - (CLLocationAccuracy)verticalAccuracy {
-    if (gSimActive && gSimLocation && self != gSimLocation) return gSimLocation.verticalAccuracy;
     CLLocationAccuracy accuracy = %orig;
     if (accuracy < 0) return accuracy;
     return MIN(accuracy, 3.0);
 }
 
 - (CLLocationDirection)course {
-    if (gSimActive && gSimLocation && self != gSimLocation) return gSimLocation.course;
     return %orig;
 }
 
 - (CLLocationSpeed)speed {
-    if (gSimActive && gSimLocation && self != gSimLocation) return gSimLocation.speed;
     return %orig;
 }
 
 - (NSDate *)timestamp {
-    if (gSimActive && gSimLocation && self != gSimLocation) return gSimLocation.timestamp;
     return %orig;
 }
 
 - (CLLocationAccuracy)speedAccuracy {
-    if (gSimActive && gSimLocation) return 0.3;
     CLLocationAccuracy accuracy = %orig;
     if (accuracy < 0) return accuracy;
     return MIN(accuracy, 0.3);
 }
 
 - (CLLocationDirectionAccuracy)courseAccuracy {
-    if (gSimActive && gSimLocation) return [SWRunSimulator sharedInstance].motionData.headingAccuracy;
     CLLocationDirectionAccuracy accuracy = %orig;
     if (accuracy < 0) return accuracy;
     return MIN(accuracy, 3.0);
