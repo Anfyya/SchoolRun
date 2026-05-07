@@ -21,7 +21,7 @@
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _stepLength = 0.76; // 180cm男生正常步长 (身高×0.42)
+        _stepLength = 0.90; // 慢跑步长
     }
     return self;
 }
@@ -31,12 +31,12 @@
 // ============================================================
 #pragma mark - 常量
 // ============================================================
-static double const kDefaultWalkingSpeed  = 1.4;  // m/s
-static double const kSpeedVariation       = 0.15; // ±15%
+static double const kDefaultWalkingSpeed  = 2.7;  // m/s, 约 6'10"/km
+static double const kSpeedVariation       = 0.04; // ±4%
 static double const kLocationJitter       = 0.000003; // ~0.3m GPS 漂移
 static double const kTickInterval         = 1.0;  // 每秒一个点
 static double const kBaseAltitude         = 15.0; // 统一起跑海拔
-static double const kNominalStepLength    = 0.76; // 用于距离反推步数
+static double const kNominalStepLength    = 0.90; // 用于距离反推步数
 static double const kMinimumPathDistance  = 1100.0; // 路线距离下限
 
 @interface SWRunSimulator ()
@@ -399,7 +399,7 @@ static double const kMinimumPathDistance  = 1100.0; // 路线距离下限
 
 /// 当前瞬时速度 (带随机变化)
 - (double)currentSpeed {
-    double variation = ((double)arc4random_uniform(200) / 1000.0 - 0.15) * 2.0;
+    double variation = ((double)arc4random_uniform(201) / 100.0) - 1.0;
     return self.walkingSpeed * (1.0 + variation * kSpeedVariation);
 }
 

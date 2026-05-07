@@ -38,7 +38,7 @@ typedef NS_ENUM(NSInteger, SWSimulatorState) {
 @property (nonatomic, assign) double    currentCadence;      // 当前步频(steps/s)
 @property (nonatomic, assign) NSInteger floorsAscended;      // 累计爬升楼层
 @property (nonatomic, assign) NSInteger floorsDescended;     // 累计下降楼层
-@property (nonatomic, assign) double    stepLength;          // 步长(米, 默认0.76=180cm男生)
+@property (nonatomic, assign) double    stepLength;          // 步长(米, 默认0.90=慢跑)
 @property (nonatomic, assign) double    currentAltitude;     // ★ 当前海拔(米)
 @property (nonatomic, assign) double    relativeAltitude;    // ★ 相对起跑海拔(米)
 @property (nonatomic, assign) double    currentPressure;     // ★ 气压(kPa, 随高度微变)
@@ -89,7 +89,7 @@ typedef NS_ENUM(NSInteger, SWSimulatorState) {
 /// 停止模拟
 - (void)stop;
 
-/// 设置步行速度 (米/秒, 默认 1.4)
+/// 设置步行速度 (米/秒, 默认 2.7)
 - (void)setWalkingSpeed:(double)speedMetersPerSecond;
 
 /// 获取到下一个目标点的估计距离

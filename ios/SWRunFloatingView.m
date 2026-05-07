@@ -48,6 +48,54 @@ static CGFloat const kSimInfoHeight    = 118.0;
 static CGFloat const kCornerRadius     = 12.0;
 static double  const kMinimumRouteDistance = 1100.0;
 
+static NSString *SWRunPaceText(double secondsPerMeter) {
+    if (secondsPerMeter <= 0 || !isfinite(secondsPerMeter)) return @"--'--\"";
+    NSInteger totalSeconds = (NSInteger)llround(secondsPerMeter * 1000.0);
+    return [NSString stringWithFormat:@"%ld'%02ld\"",
+            (long)(totalSeconds / 60),
+            (long)(totalSeconds % 60)];
+}
+
+static BOOL SWRunCoordinateOutOfChina(CLLocationCoordinate2D coord) {
+    return coord.longitude < 72.004 || coord.longitude > 137.8347 ||
+           coord.latitude < 0.8293 || coord.latitude > 55.8271;
+}
+
+static double SWRunTransformLat(double x, double y) {
+    double ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * sqrt(fabs(x));
+    ret += (20.0 * sin(6.0 * x * M_PI) + 20.0 * sin(2.0 * x * M_PI)) * 2.0 / 3.0;
+    ret += (20.0 * sin(y * M_PI) + 40.0 * sin(y / 3.0 * M_PI)) * 2.0 / 3.0;
+    ret += (160.0 * sin(y / 12.0 * M_PI) + 320.0 * sin(y * M_PI / 30.0)) * 2.0 / 3.0;
+    return ret;
+}
+
+static double SWRunTransformLng(double x, double y) {
+    double ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * sqrt(fabs(x));
+    ret += (20.0 * sin(6.0 * x * M_PI) + 20.0 * sin(2.0 * x * M_PI)) * 2.0 / 3.0;
+    ret += (20.0 * sin(x * M_PI) + 40.0 * sin(x / 3.0 * M_PI)) * 2.0 / 3.0;
+    ret += (150.0 * sin(x / 12.0 * M_PI) + 300.0 * sin(x / 30.0 * M_PI)) * 2.0 / 3.0;
+    return ret;
+}
+
+static CLLocationCoordinate2D SWRunGCJ02ToWGS84(CLLocationCoordinate2D coord) {
+    if (!CLLocationCoordinate2DIsValid(coord) || SWRunCoordinateOutOfChina(coord)) return coord;
+
+    double a = 6378245.0;
+    double ee = 0.00669342162296594323;
+    double dLat = SWRunTransformLat(coord.longitude - 105.0, coord.latitude - 35.0);
+    double dLng = SWRunTransformLng(coord.longitude - 105.0, coord.latitude - 35.0);
+    double radLat = coord.latitude / 180.0 * M_PI;
+    double magic = sin(radLat);
+    magic = 1 - ee * magic * magic;
+    double sqrtMagic = sqrt(magic);
+    dLat = (dLat * 180.0) / ((a * (1 - ee)) / (magic * sqrtMagic) * M_PI);
+    dLng = (dLng * 180.0) / (a / sqrtMagic * cos(radLat) * M_PI);
+    double mgLat = coord.latitude + dLat;
+    double mgLng = coord.longitude + dLng;
+    return CLLocationCoordinate2DMake(coord.latitude * 2.0 - mgLat,
+                                      coord.longitude * 2.0 - mgLng);
+}
+
 @interface SWRunPassthroughWindow : UIWindow
 @end
 
@@ -424,7 +472,7 @@ static double  const kMinimumRouteDistance = 1100.0;
     if (!self.hasCurrentDisplayCoordinate) return;
 
     self.currentLocationAnnotation = [[MKPointAnnotation alloc] init];
-    self.currentLocationAnnotation.coordinate = self.currentDisplayCoordinate;
+    self.currentLocationAnnotation.coordinate = SWRunGCJ02ToWGS84(self.currentDisplayCoordinate);
     self.currentLocationAnnotation.title = @"当前位置";
     [self.routeMapView addAnnotation:self.currentLocationAnnotation];
 }
@@ -447,7 +495,9 @@ static double  const kMinimumRouteDistance = 1100.0;
         return;
     }
     for (NSInteger i = 0; i < coords.count; i++) {
-        [coords[i] getValue:&polyCoords[i]];
+        CLLocationCoordinate2D coord;
+        [coords[i] getValue:&coord];
+        polyCoords[i] = SWRunGCJ02ToWGS84(coord);
     }
 
     self.routePolyline = [MKPolyline polylineWithCoordinates:polyCoords count:coords.count];
@@ -458,7 +508,7 @@ static double  const kMinimumRouteDistance = 1100.0;
         SWRunCheckpoint *cp = self.checkpoints[i];
         if (fabs(cp.latitude) < 0.000001 || fabs(cp.longitude) < 0.000001) continue;
         MKPointAnnotation *annotation = [[MKPointAnnotation alloc] init];
-        annotation.coordinate = CLLocationCoordinate2DMake(cp.latitude, cp.longitude);
+        annotation.coordinate = SWRunGCJ02ToWGS84(CLLocationCoordinate2DMake(cp.latitude, cp.longitude));
         annotation.title = cp.pointName.length > 0 ? cp.pointName : [NSString stringWithFormat:@"P%ld", (long)(i + 1)];
         [self.routeMapView addAnnotation:annotation];
     }
@@ -466,7 +516,7 @@ static double  const kMinimumRouteDistance = 1100.0;
 
     MKMapRect mapRect = self.routePolyline.boundingMapRect;
     if (self.hasCurrentDisplayCoordinate) {
-        MKMapPoint currentPoint = MKMapPointForCoordinate(self.currentDisplayCoordinate);
+        MKMapPoint currentPoint = MKMapPointForCoordinate(SWRunGCJ02ToWGS84(self.currentDisplayCoordinate));
         mapRect = MKMapRectUnion(mapRect, MKMapRectMake(currentPoint.x, currentPoint.y, 1, 1));
     }
     if (!MKMapRectIsNull(mapRect) && !MKMapRectIsEmpty(mapRect)) {
@@ -1040,13 +1090,14 @@ static double  const kMinimumRouteDistance = 1100.0;
             NSString *targetText = sim.currentTargetIndex >= 0
                 ? [NSString stringWithFormat:@"P%ld", (long)(sim.currentTargetIndex + 1)]
                 : @"补足距离";
+            NSString *paceText = SWRunPaceText(md.currentPace);
             self.simStatusLabel.text = [NSString stringWithFormat:
-                @"模拟中 %.0f/%.0fm  %.0fs\n步数 %ld  步频 %.0f步/分  配速 %.2fs/m\n海拔 %.1fm  气压 %.2fkPa  航向 %.0f°\n当前位置 %.6f, %.6f  目标 %@",
+                @"模拟中 %.0f/%.0fm  %.0fs\n步数 %ld  步频 %.0f步/分  配速 %@/km\n海拔 %.1fm  气压 %.2fkPa  航向 %.0f°\n当前位置 %.6f, %.6f  目标 %@",
                 sim.traveledDistance, sim.totalPathDistance,
                 sim.elapsedSeconds,
                 (long)md.numberOfSteps,
                 md.currentCadence * 60.0,
-                md.currentPace,
+                paceText,
                 md.currentAltitude,
                 md.currentPressure,
                 md.currentHeading,

@@ -1443,15 +1443,18 @@ static CLLocation *SWRunLocationFromProvider(id provider) {
 static CLLocation *SWRunCurrentRealStartLocation(void) {
     SWRunEnsureLocationContainers();
 
-    CLLocation *best = nil;
-    for (CLLocationManager *mgr in gLocationManagers) {
-        best = SWRunBetterRealLocation([mgr location], best);
-    }
+    CLLocation *amapBest = nil;
     for (id mgr in gAMapLocationManagers) {
-        best = SWRunBetterRealLocation(SWRunLocationFromProvider(mgr), best);
+        amapBest = SWRunBetterRealLocation(SWRunLocationFromProvider(mgr), amapBest);
     }
 
-    if (gPreflightLocation) {
+    CLLocation *coreBest = nil;
+    for (CLLocationManager *mgr in gLocationManagers) {
+        coreBest = SWRunBetterRealLocation([mgr location], coreBest);
+    }
+
+    CLLocation *best = SWRunLocationIsFresh(amapBest) ? amapBest : SWRunBetterRealLocation(amapBest, coreBest);
+    if ((!best || !SWRunLocationIsFresh(best)) && gPreflightLocation) {
         best = SWRunBetterRealLocation(gPreflightLocation, best);
     }
 
@@ -1573,6 +1576,14 @@ static NSString *SWRunCurrentTargetLabel(SWRunSimulator *sim) {
     return @"补足距离";
 }
 
+static NSString *SWRunPaceText(double secondsPerMeter) {
+    if (secondsPerMeter <= 0 || !isfinite(secondsPerMeter)) return @"--'--\"";
+    NSInteger totalSeconds = (NSInteger)llround(secondsPerMeter * 1000.0);
+    return [NSString stringWithFormat:@"%ld'%02ld\"",
+            (long)(totalSeconds / 60),
+            (long)(totalSeconds % 60)];
+}
+
 /// 启动GPS模拟 — 由浮动窗按钮触发
 void SWRunStartGPSSimulation(void) {
     if (gSimActive || gSimStarting) return;
@@ -1630,13 +1641,14 @@ void SWRunStartGPSSimulation(void) {
         SWRunSimulator *sim = [SWRunSimulator sharedInstance];
         SWSimulatedMotionData *md = sim.motionData;
         NSString *targetLabel = SWRunCurrentTargetLabel(sim);
+        NSString *paceText = SWRunPaceText(md.currentPace);
         NSString *status = [NSString stringWithFormat:
-            @"模拟中 %.0f/%.0fm  %.0fs\n步数 %ld  步频 %.0f步/分  配速 %.2fs/m\n海拔 %.1fm  气压 %.2fkPa  航向 %.0f°\n当前位置 %.6f, %.6f  目标 %@",
+            @"模拟中 %.0f/%.0fm  %.0fs\n步数 %ld  步频 %.0f步/分  配速 %@/km\n海拔 %.1fm  气压 %.2fkPa  航向 %.0f°\n当前位置 %.6f, %.6f  目标 %@",
             sim.traveledDistance, sim.totalPathDistance,
             sim.elapsedSeconds,
             (long)md.numberOfSteps,
             md.currentCadence * 60.0,
-            md.currentPace,
+            paceText,
             md.currentAltitude,
             md.currentPressure,
             md.currentHeading,
@@ -1853,6 +1865,12 @@ void SWRunToggleSimulation(void) {
 /// 缓存的模拟计步器数据 (从 SWRunSimulator.motionData 获取)
 static CMPedometerData *gFakePedometerData = nil;
 
+static BOOL SWRunShouldSpoofMotionData(void) {
+    if (!gSimActive) return NO;
+    SWSimulatorState state = [SWRunSimulator sharedInstance].state;
+    return state == SWSimulatorStateRunning || state == SWSimulatorStatePaused;
+}
+
 /// 生成一个假的 CMPedometerData
 static CMPedometerData *BuildFakePedometerData(NSDate *startDate, NSDate *endDate) {
     SWRunSimulator *sim = [SWRunSimulator sharedInstance];
@@ -1929,7 +1947,7 @@ static CMPedometerData *BuildFakePedometerData(NSDate *startDate, NSDate *endDat
         // 但我们无法在 %orig 之前知道 handler 内容
         // 方案: 包装 handler
         CMPedometerHandler wrappedHandler = ^(CMPedometerData *data, NSError *error) {
-            if (gSimActive) {
+            if (SWRunShouldSpoofMotionData()) {
                 CMPedometerData *fakeData = BuildFakePedometerData(start, [NSDate date]);
                 if (fakeData) {
                     handler(fakeData, nil);
@@ -1952,7 +1970,7 @@ static CMPedometerData *BuildFakePedometerData(NSDate *startDate, NSDate *endDat
                        withHandler:(CMPedometerHandler)handler {
     if (!handler) { %orig; return; }
 
-    if (gSimActive) {
+    if (SWRunShouldSpoofMotionData()) {
         CMPedometerData *fakeData = BuildFakePedometerData(start, end);
         if (fakeData) {
             handler(fakeData, nil);
@@ -1967,17 +1985,17 @@ static CMPedometerData *BuildFakePedometerData(NSDate *startDate, NSDate *endDat
 %hook CMPedometerData
 
 - (NSNumber *)numberOfSteps {
-    if (gSimActive) return @([SWRunSimulator sharedInstance].motionData.numberOfSteps);
+    if (SWRunShouldSpoofMotionData()) return @([SWRunSimulator sharedInstance].motionData.numberOfSteps);
     return %orig;
 }
 
 - (NSNumber *)distance {
-    if (gSimActive) return @([SWRunSimulator sharedInstance].motionData.distance);
+    if (SWRunShouldSpoofMotionData()) return @([SWRunSimulator sharedInstance].motionData.distance);
     return %orig;
 }
 
 - (NSDate *)startDate {
-    if (gSimActive) {
+    if (SWRunShouldSpoofMotionData()) {
         NSDate *start = [SWRunSimulator sharedInstance].simulationStartDate;
         if (start) return start;
     }
@@ -1985,32 +2003,32 @@ static CMPedometerData *BuildFakePedometerData(NSDate *startDate, NSDate *endDat
 }
 
 - (NSDate *)endDate {
-    if (gSimActive) return [NSDate date];
+    if (SWRunShouldSpoofMotionData()) return [NSDate date];
     return %orig;
 }
 
 - (NSNumber *)averageActivePace {
-    if (gSimActive) return @([SWRunSimulator sharedInstance].motionData.averageActivePace);
+    if (SWRunShouldSpoofMotionData()) return @([SWRunSimulator sharedInstance].motionData.averageActivePace);
     return %orig;
 }
 
 - (NSNumber *)currentPace {
-    if (gSimActive) return @([SWRunSimulator sharedInstance].motionData.currentPace);
+    if (SWRunShouldSpoofMotionData()) return @([SWRunSimulator sharedInstance].motionData.currentPace);
     return %orig;
 }
 
 - (NSNumber *)currentCadence {
-    if (gSimActive) return @([SWRunSimulator sharedInstance].motionData.currentCadence);
+    if (SWRunShouldSpoofMotionData()) return @([SWRunSimulator sharedInstance].motionData.currentCadence);
     return %orig;
 }
 
 - (NSNumber *)floorsAscended {
-    if (gSimActive) return @([SWRunSimulator sharedInstance].motionData.floorsAscended);
+    if (SWRunShouldSpoofMotionData()) return @([SWRunSimulator sharedInstance].motionData.floorsAscended);
     return %orig;
 }
 
 - (NSNumber *)floorsDescended {
-    if (gSimActive) return @([SWRunSimulator sharedInstance].motionData.floorsDescended);
+    if (SWRunShouldSpoofMotionData()) return @([SWRunSimulator sharedInstance].motionData.floorsDescended);
     return %orig;
 }
 
@@ -2062,8 +2080,8 @@ static CMMotionActivity *SWRunBuildFakeActivity(void) {
     CMMotionActivity *activity = [[CMMotionActivity alloc] init];
     @try {
         [activity setValue:@(NO) forKey:@"stationary"];
-        [activity setValue:@(YES) forKey:@"walking"];
-        [activity setValue:@(NO) forKey:@"running"];
+        [activity setValue:@(NO) forKey:@"walking"];
+        [activity setValue:@(YES) forKey:@"running"];
         [activity setValue:@(NO) forKey:@"automotive"];
         [activity setValue:@(NO) forKey:@"cycling"];
         [activity setValue:@(CMMotionActivityConfidenceHigh) forKey:@"confidence"];
@@ -2111,17 +2129,17 @@ static CMMotionActivity *SWRunBuildFakeActivity(void) {
 }
 
 - (void)startAccelerometerUpdates {
-    if (gSimActive) NSLog(@"[SWRunHUD] CMMotionManager accelerometer -> 模拟数据已接管");
+    if (SWRunShouldSpoofMotionData()) NSLog(@"[SWRunHUD] CMMotionManager accelerometer -> 模拟数据已接管");
     %orig;
 }
 
 - (void)startGyroUpdates {
-    if (gSimActive) NSLog(@"[SWRunHUD] CMMotionManager gyro -> 模拟数据已接管");
+    if (SWRunShouldSpoofMotionData()) NSLog(@"[SWRunHUD] CMMotionManager gyro -> 模拟数据已接管");
     %orig;
 }
 
 - (void)startDeviceMotionUpdates {
-    if (gSimActive) NSLog(@"[SWRunHUD] CMMotionManager deviceMotion -> 模拟数据已接管");
+    if (SWRunShouldSpoofMotionData()) NSLog(@"[SWRunHUD] CMMotionManager deviceMotion -> 模拟数据已接管");
     %orig;
 }
 
@@ -2145,7 +2163,7 @@ static CMMotionActivity *SWRunBuildFakeActivity(void) {
 %hook CMAccelerometerData
 
 - (CMAcceleration)acceleration {
-    if (gSimActive) return SWRunFakeAccelerometer();
+    if (SWRunShouldSpoofMotionData()) return SWRunFakeAccelerometer();
     return %orig;
 }
 
@@ -2154,7 +2172,7 @@ static CMMotionActivity *SWRunBuildFakeActivity(void) {
 %hook CMGyroData
 
 - (CMRotationRate)rotationRate {
-    if (gSimActive) return SWRunFakeRotationRate();
+    if (SWRunShouldSpoofMotionData()) return SWRunFakeRotationRate();
     return %orig;
 }
 
@@ -2163,17 +2181,17 @@ static CMMotionActivity *SWRunBuildFakeActivity(void) {
 %hook CMDeviceMotion
 
 - (CMAcceleration)userAcceleration {
-    if (gSimActive) return SWRunFakeUserAcceleration();
+    if (SWRunShouldSpoofMotionData()) return SWRunFakeUserAcceleration();
     return %orig;
 }
 
 - (CMAcceleration)gravity {
-    if (gSimActive) return SWRunFakeGravity();
+    if (SWRunShouldSpoofMotionData()) return SWRunFakeGravity();
     return %orig;
 }
 
 - (CMRotationRate)rotationRate {
-    if (gSimActive) return SWRunFakeRotationRate();
+    if (SWRunShouldSpoofMotionData()) return SWRunFakeRotationRate();
     return %orig;
 }
 
@@ -2194,25 +2212,28 @@ static CMMotionActivity *SWRunBuildFakeActivity(void) {
     if (!handler) { %orig; return; }
 
     if (gSimActive) {
-        // 创建一个假的 walking activity
+        // 创建一个假的 running activity
         NSOperationQueue *targetQueue = queue ?: [NSOperationQueue mainQueue];
-        [targetQueue addOperationWithBlock:^{
-            handler(SWRunBuildFakeActivity());
-        }];
+        if (SWRunShouldSpoofMotionData()) {
+            [targetQueue addOperationWithBlock:^{
+                handler(SWRunBuildFakeActivity());
+            }];
+        }
 
         CMMotionActivityHandler wrappedHandler = ^(CMMotionActivity *activity) {
-            if (gSimActive) {
-                // 尝试用 KVC 构造 walking 的 activity
+            if (SWRunShouldSpoofMotionData()) {
+                // 尝试用 KVC 构造 running 的 activity
+                CMMotionActivity *targetActivity = activity ?: SWRunBuildFakeActivity();
                 @try {
-                    [activity setValue:@(YES) forKey:@"walking"];
-                    [activity setValue:@(0.95) forKey:@"confidence"];
-                    [activity setValue:@(NO)  forKey:@"running"];
-                    [activity setValue:@(NO)  forKey:@"automotive"];
-                    [activity setValue:@(NO)  forKey:@"cycling"];
-                    [activity setValue:@(NO)  forKey:@"stationary"];
-                    [activity setValue:[NSDate date] forKey:@"startDate"];
+                    [targetActivity setValue:@(NO)  forKey:@"walking"];
+                    [targetActivity setValue:@(0.95) forKey:@"confidence"];
+                    [targetActivity setValue:@(YES) forKey:@"running"];
+                    [targetActivity setValue:@(NO)  forKey:@"automotive"];
+                    [targetActivity setValue:@(NO)  forKey:@"cycling"];
+                    [targetActivity setValue:@(NO)  forKey:@"stationary"];
+                    [targetActivity setValue:[NSDate date] forKey:@"startDate"];
                 } @catch (NSException *e) {}
-                handler(activity);
+                handler(targetActivity);
             } else {
                 handler(activity);
             }
@@ -2229,7 +2250,7 @@ static CMMotionActivity *SWRunBuildFakeActivity(void) {
                           withHandler:(CMMotionActivityQueryHandler)handler {
     if (!handler) { %orig; return; }
 
-    if (gSimActive) {
+    if (SWRunShouldSpoofMotionData()) {
         NSOperationQueue *targetQueue = queue ?: [NSOperationQueue mainQueue];
         [targetQueue addOperationWithBlock:^{
             handler(@[SWRunBuildFakeActivity()], nil);
@@ -2244,37 +2265,37 @@ static CMMotionActivity *SWRunBuildFakeActivity(void) {
 %hook CMMotionActivity
 
 - (BOOL)stationary {
-    if (gSimActive) return NO;
+    if (SWRunShouldSpoofMotionData()) return NO;
     return %orig;
 }
 
 - (BOOL)walking {
-    if (gSimActive) return YES;
+    if (SWRunShouldSpoofMotionData()) return NO;
     return %orig;
 }
 
 - (BOOL)running {
-    if (gSimActive) return NO;
+    if (SWRunShouldSpoofMotionData()) return YES;
     return %orig;
 }
 
 - (BOOL)automotive {
-    if (gSimActive) return NO;
+    if (SWRunShouldSpoofMotionData()) return NO;
     return %orig;
 }
 
 - (BOOL)cycling {
-    if (gSimActive) return NO;
+    if (SWRunShouldSpoofMotionData()) return NO;
     return %orig;
 }
 
 - (CMMotionActivityConfidence)confidence {
-    if (gSimActive) return CMMotionActivityConfidenceHigh;
+    if (SWRunShouldSpoofMotionData()) return CMMotionActivityConfidenceHigh;
     return %orig;
 }
 
 - (NSDate *)startDate {
-    if (gSimActive) return [SWRunSimulator sharedInstance].simulationStartDate ?: [NSDate date];
+    if (SWRunShouldSpoofMotionData()) return [SWRunSimulator sharedInstance].simulationStartDate ?: [NSDate date];
     return %orig;
 }
 
@@ -2296,7 +2317,7 @@ static CMMotionActivity *SWRunBuildFakeActivity(void) {
 
     if (gSimActive) {
         CMAltitudeHandler wrappedHandler = ^(CMAltitudeData *data, NSError *error) {
-            if (gSimActive) {
+            if (SWRunShouldSpoofMotionData() && data) {
                 SWSimulatedMotionData *md = [SWRunSimulator sharedInstance].motionData;
                 @try {
                     [data setValue:@(md.relativeAltitude) forKey:@"relativeAltitude"];
@@ -2318,12 +2339,12 @@ static CMMotionActivity *SWRunBuildFakeActivity(void) {
 %hook CMAltitudeData
 
 - (NSNumber *)relativeAltitude {
-    if (gSimActive) return @([SWRunSimulator sharedInstance].motionData.relativeAltitude);
+    if (SWRunShouldSpoofMotionData()) return @([SWRunSimulator sharedInstance].motionData.relativeAltitude);
     return %orig;
 }
 
 - (NSNumber *)pressure {
-    if (gSimActive) return @([SWRunSimulator sharedInstance].motionData.currentPressure);
+    if (SWRunShouldSpoofMotionData()) return @([SWRunSimulator sharedInstance].motionData.currentPressure);
     return %orig;
 }
 
