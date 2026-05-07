@@ -45,6 +45,12 @@
 /// 高德响应类
 @property (nonatomic, assign) Class amapWalkingResponseClass;
 
+- (void)appendWalkingRouteCoordinates:(NSArray<NSValue *> *)coordinates
+                                index:(NSInteger)index
+                          routeCoords:(NSMutableArray<NSValue *> *)routeCoords
+                           worstSource:(SWPathSource)worstSource
+                            completion:(void(^)(NSArray<NSValue *> *routeCoordinates, SWPathSource overallSource))completion;
+
 @end
 
 @implementation SWRunRouteRealPath
@@ -543,34 +549,40 @@
     }
 
     NSMutableArray<NSValue *> *routeCoords = [NSMutableArray array];
-    __block SWPathSource worstSource = SWPathSourceAMap;
-    __block void (^walkNext)(NSInteger index);
+    [self appendWalkingRouteCoordinates:coordinates
+                                  index:0
+                            routeCoords:routeCoords
+                             worstSource:SWPathSourceAMap
+                              completion:completion];
+}
 
-    walkNext = ^(NSInteger index) {
-        if (index >= coordinates.count - 1) {
-            completion(routeCoords, worstSource);
-            return;
-        }
+- (void)appendWalkingRouteCoordinates:(NSArray<NSValue *> *)coordinates
+                                index:(NSInteger)index
+                          routeCoords:(NSMutableArray<NSValue *> *)routeCoords
+                           worstSource:(SWPathSource)worstSource
+                            completion:(void(^)(NSArray<NSValue *> *routeCoordinates, SWPathSource overallSource))completion {
+    if (index >= coordinates.count - 1) {
+        completion(routeCoords, worstSource);
+        return;
+    }
 
-        CLLocationCoordinate2D from;
-        [coordinates[index] getValue:&from];
-        CLLocationCoordinate2D to;
-        [coordinates[index + 1] getValue:&to];
+    CLLocationCoordinate2D from;
+    [coordinates[index] getValue:&from];
+    CLLocationCoordinate2D to;
+    [coordinates[index + 1] getValue:&to];
 
-        [self walkingDistanceFrom:from to:to completion:^(SWPathSegment *result) {
-            if (result.source > worstSource) {
-                worstSource = result.source;
-            }
-
-            NSArray<NSValue *> *segmentCoords = result.pathCoordinates.count >= 2
-                ? result.pathCoordinates
-                : [self fallbackPathCoordinatesFrom:from to:to];
-            [self appendSegmentCoordinates:segmentCoords toRouteCoords:routeCoords];
-            walkNext(index + 1);
-        }];
-    };
-
-    walkNext(0);
+    [self walkingDistanceFrom:from to:to completion:^(SWPathSegment *result) {
+        SWPathSource nextWorstSource = result.source > worstSource ? result.source : worstSource;
+        NSArray<NSValue *> *segmentCoords = result.pathCoordinates.count >= 2
+            ? result.pathCoordinates
+            : [self fallbackPathCoordinatesFrom:from to:to];
+        [self appendSegmentCoordinates:segmentCoords toRouteCoords:routeCoords];
+        [self appendWalkingRouteCoordinates:coordinates
+                                      index:index + 1
+                                routeCoords:routeCoords
+                                 worstSource:nextWorstSource
+                                  completion:completion];
+    }];
 }
 
 // ============================================================
