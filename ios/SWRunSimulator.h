@@ -75,6 +75,7 @@ typedef NS_ENUM(NSInteger, SWSimulatorState) {
 /// @param completion 完成回调
 - (void)startSimulationWithCheckpoints:(NSArray<SWRunCheckpoint *> *)checkpoints
                           visitOrder:(NSArray<NSNumber *> *)optimalOrder
+                        startLocation:(nullable CLLocation *)startLocation
                      onTick:(SWSimulatorTickBlock)tickBlock
                   onComplete:(nullable SWSimulatorCompleteBlock)completeBlock;
 

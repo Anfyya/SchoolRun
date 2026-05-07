@@ -40,9 +40,10 @@ static CGFloat const kHeaderHeight     = 44.0;
 static CGFloat const kRowHeight        = 42.0;
 static CGFloat const kCollapsedWidth   = 56.0;
 static CGFloat const kCollapsedHeight  = 56.0;
-static CGFloat const kExpandedWidth    = 300.0;
-static CGFloat const kMaxHeight        = 560.0;
-static CGFloat const kMapHeight        = 140.0;
+static CGFloat const kExpandedWidth    = 350.0;
+static CGFloat const kMaxHeight        = 660.0;
+static CGFloat const kMapHeight        = 320.0;
+static CGFloat const kSimInfoHeight    = 118.0;
 static CGFloat const kCornerRadius     = 12.0;
 static double  const kMinimumRouteDistance = 1100.0;
 
@@ -87,6 +88,11 @@ static double  const kMinimumRouteDistance = 1100.0;
 @property (nonatomic, assign) CGPoint             dragStartPoint;
 @property (nonatomic, strong) SWRunRoutePlan     *currentPlan;       // 当前路线规划
 @property (nonatomic, strong) MKPolyline         *routePolyline;
+@property (nonatomic, strong) MKPointAnnotation  *currentLocationAnnotation;
+@property (nonatomic, assign) CLLocationCoordinate2D currentDisplayCoordinate;
+@property (nonatomic, assign) CLLocationCoordinate2D routeStartCoordinate;
+@property (nonatomic, assign) BOOL                hasCurrentDisplayCoordinate;
+@property (nonatomic, assign) BOOL                hasRouteStartCoordinate;
 
 @end
 
@@ -231,8 +237,9 @@ static double  const kMinimumRouteDistance = 1100.0;
     self.simStatusLabel = [[UILabel alloc] init];
     self.simStatusLabel.text = @"";
     self.simStatusLabel.textColor = [UIColor colorWithRed:0.3 green:1.0 blue:0.5 alpha:1.0];
-    self.simStatusLabel.font = [UIFont systemFontOfSize:9];
-    self.simStatusLabel.textAlignment = NSTextAlignmentCenter;
+    self.simStatusLabel.font = [UIFont monospacedDigitSystemFontOfSize:10 weight:UIFontWeightMedium];
+    self.simStatusLabel.textAlignment = NSTextAlignmentLeft;
+    self.simStatusLabel.numberOfLines = 0;
     [self.containerView addSubview:self.simStatusLabel];
 
     // 路线规划摘要标签
@@ -331,6 +338,10 @@ static double  const kMinimumRouteDistance = 1100.0;
     }
 
     NSMutableArray<NSValue *> *coords = [NSMutableArray array];
+    if (self.hasRouteStartCoordinate) {
+        [coords addObject:[NSValue valueWithMKCoordinate:self.routeStartCoordinate]];
+    }
+
     for (NSNumber *idxNum in order) {
         NSInteger idx = [idxNum integerValue];
         if (idx < 0 || idx >= self.checkpoints.count) continue;
@@ -356,6 +367,15 @@ static double  const kMinimumRouteDistance = 1100.0;
     }
 
     return coords;
+}
+
+- (void)addCurrentLocationAnnotationIfNeeded {
+    if (!self.hasCurrentDisplayCoordinate) return;
+
+    self.currentLocationAnnotation = [[MKPointAnnotation alloc] init];
+    self.currentLocationAnnotation.coordinate = self.currentDisplayCoordinate;
+    self.currentLocationAnnotation.title = @"当前位置";
+    [self.routeMapView addAnnotation:self.currentLocationAnnotation];
 }
 
 - (void)refreshRouteMap {
@@ -391,11 +411,16 @@ static double  const kMinimumRouteDistance = 1100.0;
         annotation.title = cp.pointName.length > 0 ? cp.pointName : [NSString stringWithFormat:@"P%ld", (long)(i + 1)];
         [self.routeMapView addAnnotation:annotation];
     }
+    [self addCurrentLocationAnnotationIfNeeded];
 
     MKMapRect mapRect = self.routePolyline.boundingMapRect;
+    if (self.hasCurrentDisplayCoordinate) {
+        MKMapPoint currentPoint = MKMapPointForCoordinate(self.currentDisplayCoordinate);
+        mapRect = MKMapRectUnion(mapRect, MKMapRectMake(currentPoint.x, currentPoint.y, 1, 1));
+    }
     if (!MKMapRectIsNull(mapRect) && !MKMapRectIsEmpty(mapRect)) {
         [self.routeMapView setVisibleMapRect:mapRect
-                                 edgePadding:UIEdgeInsetsMake(14, 14, 14, 14)
+                                 edgePadding:UIEdgeInsetsMake(10, 10, 10, 10)
                                     animated:NO];
     }
     self.routeMapView.hidden = NO;
@@ -414,6 +439,21 @@ static double  const kMinimumRouteDistance = 1100.0;
 }
 
 - (MKAnnotationView *)mapView:(MKMapView *)mapView viewForAnnotation:(id<MKAnnotation>)annotation {
+    if (annotation == self.currentLocationAnnotation) {
+        static NSString *currentIdentifier = @"SWRunCurrentAnnotation";
+        MKMarkerAnnotationView *currentView = (MKMarkerAnnotationView *)[mapView dequeueReusableAnnotationViewWithIdentifier:currentIdentifier];
+        if (!currentView) {
+            currentView = [[MKMarkerAnnotationView alloc] initWithAnnotation:annotation reuseIdentifier:currentIdentifier];
+            currentView.canShowCallout = NO;
+        } else {
+            currentView.annotation = annotation;
+        }
+        currentView.markerTintColor = [UIColor colorWithRed:0.0 green:0.8 blue:0.35 alpha:1.0];
+        currentView.glyphTintColor = [UIColor whiteColor];
+        currentView.glyphText = @"●";
+        return currentView;
+    }
+
     static NSString *identifier = @"SWRunPointAnnotation";
     MKMarkerAnnotationView *view = (MKMarkerAnnotationView *)[mapView dequeueReusableAnnotationViewWithIdentifier:identifier];
     if (!view) {
@@ -439,6 +479,7 @@ static double  const kMinimumRouteDistance = 1100.0;
 
         CGFloat yPos = 80;
         CGFloat maxPanelHeight = MIN(kMaxHeight, self.superview.bounds.size.height - yPos - 20);
+        CGFloat panelWidth = MIN(kExpandedWidth, self.superview.bounds.size.width - 20);
 
         // 路线摘要高度
         CGFloat routeInfoH = 0;
@@ -446,32 +487,38 @@ static double  const kMinimumRouteDistance = 1100.0;
             routeInfoH = 52; // 约3行文本高度
         }
 
-        CGFloat mapH = self.checkpoints.count >= 2 ? kMapHeight : 0;
-        CGFloat simStatusH = self.isSimRunning ? 16 : 0;
-        CGFloat tableMaxHeight = MAX(0, maxPanelHeight - kHeaderHeight - routeInfoH - mapH - simStatusH);
-        CGFloat tableHeight = MIN(self.checkpoints.count * kRowHeight, tableMaxHeight);
+        CGFloat simStatusH = self.simStatusLabel.text.length > 0 ? kSimInfoHeight : 0;
+        CGFloat mapH = 0;
+        if (self.checkpoints.count >= 2) {
+            CGFloat availableMapHeight = maxPanelHeight - kHeaderHeight - routeInfoH - simStatusH;
+            mapH = MIN(kMapHeight, MAX(180.0, availableMapHeight));
+            if (availableMapHeight < 180.0) {
+                mapH = MAX(0, availableMapHeight);
+            }
+        }
+        CGFloat tableHeight = 0;
         CGFloat totalHeight = kHeaderHeight + routeInfoH + mapH + simStatusH + tableHeight;
 
-        self.containerView.frame = CGRectMake(10, yPos, kExpandedWidth, totalHeight);
+        self.containerView.frame = CGRectMake(10, yPos, panelWidth, MIN(totalHeight, maxPanelHeight));
         self.containerView.layer.cornerRadius = kCornerRadius;
 
         // Header
         UIView *header = self.containerView.subviews.firstObject;
-        header.frame = CGRectMake(0, 0, kExpandedWidth, kHeaderHeight);
+        header.frame = CGRectMake(0, 0, panelWidth, kHeaderHeight);
 
         self.toggleBtn.frame = CGRectMake(4, 4, 36, 36);
 
         // ★ 模拟按钮布局
-        self.parseBtn.frame = CGRectMake(kExpandedWidth - 162, 6, 42, 26);
-        self.simBtn.frame = CGRectMake(kExpandedWidth - 75, 6, 65, 26);
-        self.simStopBtn.frame = CGRectMake(kExpandedWidth - 116, 6, 36, 26);
+        self.parseBtn.frame = CGRectMake(panelWidth - 162, 6, 42, 26);
+        self.simBtn.frame = CGRectMake(panelWidth - 75, 6, 65, 26);
+        self.simStopBtn.frame = CGRectMake(panelWidth - 116, 6, 36, 26);
 
-        self.titleLabel.frame = CGRectMake(40, 0, kExpandedWidth - 205, 26);
-        self.distanceLabel.frame = CGRectMake(40, 22, kExpandedWidth - 205, 20);
+        self.titleLabel.frame = CGRectMake(40, 0, panelWidth - 205, 26);
+        self.distanceLabel.frame = CGRectMake(40, 22, panelWidth - 205, 20);
 
         // Route Info (在 header 下方)
         if (routeInfoH > 0) {
-            self.routeInfoLabel.frame = CGRectMake(8, kHeaderHeight, kExpandedWidth - 16, routeInfoH);
+            self.routeInfoLabel.frame = CGRectMake(8, kHeaderHeight, panelWidth - 16, routeInfoH);
             self.routeInfoLabel.hidden = NO;
         } else {
             self.routeInfoLabel.frame = CGRectZero;
@@ -479,8 +526,8 @@ static double  const kMinimumRouteDistance = 1100.0;
         }
 
         CGFloat mapY = kHeaderHeight + routeInfoH;
-        if (mapH > 0) {
-            self.routeMapView.frame = CGRectMake(8, mapY + 6, kExpandedWidth - 16, mapH - 10);
+        if (mapH > 10) {
+            self.routeMapView.frame = CGRectMake(8, mapY + 6, panelWidth - 16, mapH - 10);
             self.routeMapView.hidden = NO;
         } else {
             self.routeMapView.frame = CGRectZero;
@@ -489,7 +536,7 @@ static double  const kMinimumRouteDistance = 1100.0;
 
         // Sim Status
         if (simStatusH > 0) {
-            self.simStatusLabel.frame = CGRectMake(8, kHeaderHeight + routeInfoH + mapH, kExpandedWidth - 16, simStatusH);
+            self.simStatusLabel.frame = CGRectMake(10, kHeaderHeight + routeInfoH + mapH, panelWidth - 20, simStatusH);
             self.simStatusLabel.hidden = NO;
         } else {
             self.simStatusLabel.frame = CGRectZero;
@@ -498,7 +545,8 @@ static double  const kMinimumRouteDistance = 1100.0;
 
         // Table
         CGFloat tableY = kHeaderHeight + routeInfoH + mapH + simStatusH;
-        self.tableView.frame = CGRectMake(0, tableY, kExpandedWidth, tableHeight);
+        self.tableView.frame = CGRectMake(0, tableY, panelWidth, tableHeight);
+        self.tableView.hidden = YES;
     } else {
         // 收起状态：悬浮小圆点
         CGFloat screenWidth = self.superview.bounds.size.width;
@@ -527,6 +575,7 @@ static double  const kMinimumRouteDistance = 1100.0;
         self.titleLabel.frame = CGRectZero;
         self.distanceLabel.frame = CGRectZero;
         self.tableView.frame = CGRectZero;
+        self.tableView.hidden = YES;
     }
 }
 
@@ -545,7 +594,7 @@ static double  const kMinimumRouteDistance = 1100.0;
 // ============================================================
 - (void)expandAnimated:(BOOL)animated {
     self.isExpanded = YES;
-    self.tableView.hidden = NO;
+    self.tableView.hidden = YES;
     self.parseBtn.hidden = NO;
     self.simBtn.hidden = NO;
     self.simStopBtn.hidden = !self.isSimRunning;
@@ -555,7 +604,6 @@ static double  const kMinimumRouteDistance = 1100.0;
     [UIView animateWithDuration:animated ? 0.3 : 0 animations:^{
         [self setNeedsLayout];
         [self layoutIfNeeded];
-        [self.tableView reloadData];
     }];
 }
 
@@ -656,7 +704,53 @@ static double  const kMinimumRouteDistance = 1100.0;
 }
 
 - (void)updateCurrentLocation:(double)lat lng:(double)lng {
-    // 可用于后续实时高亮最近的点位
+    dispatch_async(dispatch_get_main_queue(), ^{
+        CLLocationCoordinate2D coord = CLLocationCoordinate2DMake(lat, lng);
+        if (!CLLocationCoordinate2DIsValid(coord) ||
+            fabs(coord.latitude) < 0.000001 ||
+            fabs(coord.longitude) < 0.000001) {
+            return;
+        }
+
+        BOOL routeNeedsRefresh = NO;
+        if (!self.isSimRunning) {
+            routeNeedsRefresh = !self.hasRouteStartCoordinate ||
+                fabs(self.routeStartCoordinate.latitude - coord.latitude) > 0.000001 ||
+                fabs(self.routeStartCoordinate.longitude - coord.longitude) > 0.000001;
+            self.routeStartCoordinate = coord;
+            self.hasRouteStartCoordinate = YES;
+        } else if (!self.hasRouteStartCoordinate) {
+            routeNeedsRefresh = YES;
+            self.routeStartCoordinate = coord;
+            self.hasRouteStartCoordinate = YES;
+        }
+
+        self.currentDisplayCoordinate = coord;
+        self.hasCurrentDisplayCoordinate = YES;
+
+        if (self.currentLocationAnnotation) {
+            self.currentLocationAnnotation.coordinate = coord;
+            MKMapPoint point = MKMapPointForCoordinate(coord);
+            MKMapRect visible = self.routeMapView.visibleMapRect;
+            if (routeNeedsRefresh || !MKMapRectContainsPoint(visible, point)) {
+                [self refreshRouteMap];
+            }
+        } else {
+            [self refreshRouteMap];
+        }
+    });
+}
+
+- (void)updateSimulationStatus:(NSString *)status location:(CLLocation *)location {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (location) {
+            [self updateCurrentLocation:location.coordinate.latitude lng:location.coordinate.longitude];
+        }
+        self.simStatusLabel.text = status ?: @"";
+        self.simStatusLabel.hidden = self.simStatusLabel.text.length == 0;
+        [self setNeedsLayout];
+        [self layoutIfNeeded];
+    });
 }
 
 - (void)updateRoutePlan:(SWRunRoutePlan *)plan {
@@ -878,13 +972,19 @@ static double  const kMinimumRouteDistance = 1100.0;
             // ★ 完整运动数据状态
             SWRunSimulator *sim = [SWRunSimulator sharedInstance];
             SWSimulatedMotionData *md = sim.motionData;
+            CLLocation *loc = sim.currentLocation;
             self.simStatusLabel.text = [NSString stringWithFormat:
-                @"🚶 模拟 | %.0f/%.0fm | 👣%ld步 | 🏃%.0f步/分 | 🏢%ld层 | 🏔%.0fm | 📍P%ld",
+                @"模拟中 %.0f/%.0fm  %.0fs\n步数 %ld  步频 %.0f步/分  配速 %.2fs/m\n海拔 %.1fm  气压 %.2fkPa  航向 %.0f°\n当前位置 %.6f, %.6f  目标 P%ld",
                 sim.traveledDistance, sim.totalPathDistance,
+                sim.elapsedSeconds,
                 (long)md.numberOfSteps,
                 md.currentCadence * 60.0,
-                (long)md.floorsAscended,
+                md.currentPace,
                 md.currentAltitude,
+                md.currentPressure,
+                md.currentHeading,
+                loc.coordinate.latitude,
+                loc.coordinate.longitude,
                 (long)(sim.currentTargetIndex + 1)];
         } else {
             [self.simBtn setTitle:@"▶️模拟" forState:UIControlStateNormal];

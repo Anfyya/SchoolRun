@@ -9,6 +9,7 @@
 #import <UIKit/UIKit.h>
 
 @class SWRunRoutePlan;
+@class CLLocation;
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -58,6 +59,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 更新实时位置标记
 - (void)updateCurrentLocation:(double)lat lng:(double)lng;
+
+/// 更新模拟状态和地图当前位置
+- (void)updateSimulationStatus:(NSString *)status location:(nullable CLLocation *)location;
 
 @end
 

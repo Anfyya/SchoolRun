@@ -1380,6 +1380,23 @@ static void SWRunRememberPreflightLocation(CLLocation *loc) {
     }
 }
 
+static CLLocation *SWRunCurrentRealStartLocation(void) {
+    if (gPreflightLocation && SWRunCoordinateLooksUsable(gPreflightLocation.coordinate)) {
+        return gPreflightLocation;
+    }
+
+    SWRunEnsureLocationContainers();
+    for (CLLocationManager *mgr in gLocationManagers) {
+        CLLocation *loc = [mgr location];
+        CLLocation *strongLoc = SWRunBuildStrongGPSLocation(loc);
+        if (strongLoc) {
+            gPreflightLocation = strongLoc;
+            return strongLoc;
+        }
+    }
+    return nil;
+}
+
 static NSArray<CLLocation *> *SWRunBuildStrongGPSLocations(NSArray<CLLocation *> *locations) {
     if (locations.count == 0) return locations;
 
@@ -1459,9 +1476,21 @@ void SWRunStartGPSSimulation(void) {
         return;
     }
 
+    CLLocation *realStartLocation = SWRunCurrentRealStartLocation();
+    if (realStartLocation) {
+        [hud updateCurrentLocation:realStartLocation.coordinate.latitude
+                                lng:realStartLocation.coordinate.longitude];
+        NSLog(@"[SWRunHUD] 📍 使用真实当前位置作为起点: %.6f, %.6f",
+              realStartLocation.coordinate.latitude,
+              realStartLocation.coordinate.longitude);
+    } else {
+        NSLog(@"[SWRunHUD] ⚠️ 未取得真实当前位置, 将从路线首点开始");
+    }
+
     [[SWRunSimulator sharedInstance]
         startSimulationWithCheckpoints:[hud valueForKey:@"checkpoints"]
                           visitOrder:plan.optimalOrder
+                        startLocation:realStartLocation
                      onTick:^(CLLocation *loc, NSInteger step) {
         gSimLocation = SWRunBuildStrongGPSLocation(loc) ?: loc;
         gSimActive = YES;
@@ -1470,19 +1499,20 @@ void SWRunStartGPSSimulation(void) {
         SWRunSimulator *sim = [SWRunSimulator sharedInstance];
         SWSimulatedMotionData *md = sim.motionData;
         NSString *status = [NSString stringWithFormat:
-            @"🚶 模拟 | %.0f/%.0fm | 👣%ld步 | 🏃%.0f步/分 | 🏢%ld层 | 🏔%.0fm | ➡P%ld",
+            @"模拟中 %.0f/%.0fm  %.0fs\n步数 %ld  步频 %.0f步/分  配速 %.2fs/m\n海拔 %.1fm  气压 %.2fkPa  航向 %.0f°\n当前位置 %.6f, %.6f  目标 P%ld",
             sim.traveledDistance, sim.totalPathDistance,
+            sim.elapsedSeconds,
             (long)md.numberOfSteps,
             md.currentCadence * 60.0,
-            (long)md.floorsAscended,
+            md.currentPace,
             md.currentAltitude,
+            md.currentPressure,
+            md.currentHeading,
+            gSimLocation.coordinate.latitude,
+            gSimLocation.coordinate.longitude,
             (long)(sim.currentTargetIndex + 1)];
         dispatch_async(dispatch_get_main_queue(), ^{
-            UILabel *label = [hud valueForKey:@"simStatusLabel"];
-            if (label) {
-                label.text = status;
-                label.hidden = NO;
-            }
+            [hud updateSimulationStatus:status location:gSimLocation];
         });
 
         // 将同一个模拟快照发送给 CoreLocation / AMap delegates
