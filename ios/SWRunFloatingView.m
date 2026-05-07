@@ -67,7 +67,6 @@ static CGFloat const kCornerRadius     = 12.0;
 @property (nonatomic, strong) UILabel            *routeInfoLabel;
 @property (nonatomic, strong) UILabel            *simStatusLabel;     // 模拟状态
 @property (nonatomic, strong) UIButton           *toggleBtn;
-@property (nonatomic, strong) UIButton           *closeBtn;
 @property (nonatomic, strong) UIButton           *simBtn;            // ★ 模拟按钮
 @property (nonatomic, strong) UIButton           *simStopBtn;        // ★ 停止按钮
 @property (nonatomic, strong) UITableView        *tableView;
@@ -181,14 +180,6 @@ static CGFloat const kCornerRadius     = 12.0;
     self.distanceLabel.textAlignment = NSTextAlignmentCenter;
     [headerView addSubview:self.distanceLabel];
 
-    // 关闭按钮
-    self.closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    [self.closeBtn setTitle:@"✕" forState:UIControlStateNormal];
-    [self.closeBtn setTitleColor:[UIColor colorWithRed:0.9 green:0.3 blue:0.3 alpha:1.0] forState:UIControlStateNormal];
-    self.closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:16];
-    [self.closeBtn addTarget:self action:@selector(hide) forControlEvents:UIControlEventTouchUpInside];
-    [headerView addSubview:self.closeBtn];
-
     // 展开/收起按钮
     self.toggleBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     [self.toggleBtn setTitle:@"▼" forState:UIControlStateNormal];
@@ -283,15 +274,14 @@ static CGFloat const kCornerRadius     = 12.0;
         UIView *header = self.containerView.subviews.firstObject;
         header.frame = CGRectMake(0, 0, kExpandedWidth, kHeaderHeight);
 
-        self.closeBtn.frame = CGRectMake(kExpandedWidth - 40, 4, 36, 36);
         self.toggleBtn.frame = CGRectMake(4, 4, 36, 36);
 
         // ★ 模拟按钮布局
-        self.simBtn.frame = CGRectMake(kExpandedWidth - 110, 6, 65, 26);
-        self.simStopBtn.frame = CGRectMake(kExpandedWidth - 155, 6, 36, 26);
+        self.simBtn.frame = CGRectMake(kExpandedWidth - 75, 6, 65, 26);
+        self.simStopBtn.frame = CGRectMake(kExpandedWidth - 116, 6, 36, 26);
 
-        self.titleLabel.frame = CGRectMake(40, 0, kExpandedWidth - 155, 26);
-        self.distanceLabel.frame = CGRectMake(40, 22, kExpandedWidth - 155, 20);
+        self.titleLabel.frame = CGRectMake(40, 0, kExpandedWidth - 160, 26);
+        self.distanceLabel.frame = CGRectMake(40, 22, kExpandedWidth - 160, 20);
 
         // Route Info (在 header 下方)
         if (routeInfoH > 0) {
@@ -332,8 +322,6 @@ static CGFloat const kCornerRadius     = 12.0;
 
         UIView *header = self.containerView.subviews.firstObject;
         header.frame = self.containerView.bounds;
-        self.closeBtn.frame = CGRectMake(0, 0, 0, 0);
-        self.closeBtn.alpha = 0;
         self.simBtn.hidden = YES;
         self.simStopBtn.hidden = YES;
         self.simStatusLabel.hidden = YES;
@@ -362,12 +350,8 @@ static CGFloat const kCornerRadius     = 12.0;
 - (void)expandAnimated:(BOOL)animated {
     self.isExpanded = YES;
     self.tableView.hidden = NO;
-    self.closeBtn.alpha = 1.0;
     self.simBtn.hidden = NO;
     self.simStopBtn.hidden = !self.isSimRunning;
-    [self.closeBtn setTitle:@"✕" forState:UIControlStateNormal];
-    [self.closeBtn setTitleColor:[UIColor colorWithRed:0.9 green:0.3 blue:0.3 alpha:1.0] forState:UIControlStateNormal];
-    self.closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:16];
     [self.toggleBtn setTitle:@"▲" forState:UIControlStateNormal];
     self.containerView.layer.cornerRadius = kCornerRadius;
 
@@ -381,7 +365,6 @@ static CGFloat const kCornerRadius     = 12.0;
 - (void)collapseAnimated:(BOOL)animated {
     self.isExpanded = NO;
     self.tableView.hidden = YES;
-    [self.closeBtn setTitle:@"" forState:UIControlStateNormal];
     [self.toggleBtn setTitle:@"📍" forState:UIControlStateNormal];
     [self.toggleBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     self.toggleBtn.titleLabel.font = [UIFont systemFontOfSize:24];

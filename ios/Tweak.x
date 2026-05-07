@@ -35,55 +35,125 @@
 #pragma mark - 辅助函数: JSON 解析
 // ============================================================
 
+static id SWRunJSONFromString(NSString *value) {
+    if (![value isKindOfClass:[NSString class]] || value.length < 2) return nil;
+
+    NSString *lower = [value lowercaseString];
+    BOOL maybePoints = [lower containsString:@"isfixed"] ||
+                       [lower containsString:@"pointname"] ||
+                       [lower containsString:@"pointsresmodels"] ||
+                       [lower containsString:@"fivepoint"];
+    if (!maybePoints) return nil;
+
+    NSData *data = [value dataUsingEncoding:NSUTF8StringEncoding];
+    if (!data) return nil;
+
+    NSError *err = nil;
+    id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:&err];
+    return err ? nil : obj;
+}
+
+static id SWRunValueForKeys(NSDictionary *dict, NSArray<NSString *> *keys) {
+    for (NSString *key in keys) {
+        id value = dict[key];
+        if (value && value != [NSNull null]) return value;
+    }
+    return nil;
+}
+
+static double SWRunDoubleFromObject(id value) {
+    if ([value isKindOfClass:[NSNumber class]]) return [value doubleValue];
+    if ([value isKindOfClass:[NSString class]]) return [(NSString *)value doubleValue];
+    return 0;
+}
+
+static BOOL SWRunBoolFromObject(id value) {
+    if ([value isKindOfClass:[NSNumber class]]) return [value boolValue];
+    if ([value isKindOfClass:[NSString class]]) {
+        NSString *lower = [(NSString *)value lowercaseString];
+        return [lower isEqualToString:@"1"] ||
+               [lower isEqualToString:@"true"] ||
+               [lower isEqualToString:@"yes"];
+    }
+    return NO;
+}
+
+static BOOL SWRunDictionaryLooksLikeCheckpoint(NSDictionary *dict) {
+    if (![dict isKindOfClass:[NSDictionary class]]) return NO;
+
+    id latObj = SWRunValueForKeys(dict, @[@"lat", @"glat", @"gLat", @"latitude"]);
+    id lonObj = SWRunValueForKeys(dict, @[@"lon", @"lng", @"glon", @"gLng", @"longitude"]);
+    if (!latObj || !lonObj) return NO;
+
+    double lat = SWRunDoubleFromObject(latObj);
+    double lon = SWRunDoubleFromObject(lonObj);
+    if (fabs(lat) < 0.000001 || fabs(lon) < 0.000001) return NO;
+
+    return dict[@"isFixed"] != nil ||
+           dict[@"isPass"] != nil ||
+           dict[@"pointName"] != nil ||
+           dict[@"fixed"] != nil;
+}
+
+static NSArray<NSDictionary *> *SWRunPointArrayFromArray(NSArray *array) {
+    if (![array isKindOfClass:[NSArray class]] || array.count == 0) return nil;
+
+    NSMutableArray<NSDictionary *> *points = [NSMutableArray array];
+    for (id item in array) {
+        if ([item isKindOfClass:[NSDictionary class]] &&
+            SWRunDictionaryLooksLikeCheckpoint((NSDictionary *)item)) {
+            [points addObject:item];
+        }
+    }
+    return points.count > 0 ? points : nil;
+}
+
 /// 从 JSON 对象中提取打卡点数组
 static NSArray<NSDictionary *> *ExtractPointsFromJSON(id jsonObject) {
     if (!jsonObject) return nil;
 
-    NSDictionary *dict = nil;
-    NSArray *pointsArray = nil;
-
-    // 方式1: 顶层 data.pointsResModels (FivePointResp.json 格式)
     if ([jsonObject isKindOfClass:[NSDictionary class]]) {
-        dict = (NSDictionary *)jsonObject;
+        NSDictionary *dict = (NSDictionary *)jsonObject;
 
-        // 检查 data.pointsResModels
+        if (SWRunDictionaryLooksLikeCheckpoint(dict)) {
+            return @[dict];
+        }
+
+        NSArray *directPoints = SWRunPointArrayFromArray(dict[@"pointsResModels"]);
+        if (directPoints) return directPoints;
+
         NSDictionary *data = dict[@"data"];
         if ([data isKindOfClass:[NSDictionary class]]) {
-            pointsArray = data[@"pointsResModels"];
-            if ([pointsArray isKindOfClass:[NSArray class]] && pointsArray.count > 0) {
-                return pointsArray;
-            }
+            NSArray *dataPoints = SWRunPointArrayFromArray(data[@"pointsResModels"]);
+            if (dataPoints) return dataPoints;
         }
 
-        // 检查 fivePointJson (内嵌 JSON 字符串)
-        NSString *fivePointStr = dict[@"fivePointJson"];
-        if ([fivePointStr isKindOfClass:[NSString class]] && fivePointStr.length > 10) {
-            NSData *jsonData = [fivePointStr dataUsingEncoding:NSUTF8StringEncoding];
-            if (jsonData) {
-                NSError *err = nil;
-                id innerObj = [NSJSONSerialization JSONObjectWithData:jsonData
-                                                              options:0
-                                                                error:&err];
-                if (!err && [innerObj isKindOfClass:[NSArray class]]) {
-                    return (NSArray *)innerObj;
-                }
-            }
+        NSArray<NSString *> *pointJsonKeys = @[@"fivePointJson", @"fivePoints", @"fixed_point_json"];
+        for (NSString *key in pointJsonKeys) {
+            id value = dict[key];
+            id parsed = [value isKindOfClass:[NSString class]] ? SWRunJSONFromString(value) : value;
+            NSArray<NSDictionary *> *nestedPoints = ExtractPointsFromJSON(parsed);
+            if (nestedPoints) return nestedPoints;
         }
 
-        // allLocJson 是轨迹数据，不作为点位数组返回
+        for (id value in dict.allValues) {
+            if ([value isKindOfClass:[NSDictionary class]] || [value isKindOfClass:[NSArray class]]) {
+                NSArray<NSDictionary *> *nestedPoints = ExtractPointsFromJSON(value);
+                if (nestedPoints) return nestedPoints;
+            } else if ([value isKindOfClass:[NSString class]]) {
+                NSArray<NSDictionary *> *nestedPoints = ExtractPointsFromJSON(SWRunJSONFromString(value));
+                if (nestedPoints) return nestedPoints;
+            }
+        }
     }
 
-    // 方式2: 直接是数组格式 (内嵌 JSON 解析结果)
     if ([jsonObject isKindOfClass:[NSArray class]]) {
-        NSArray *arr = (NSArray *)jsonObject;
-        if (arr.count >= 3) {
-            // 检查是否包含 pointName 或 isFixed 字段
-            NSDictionary *firstItem = arr.firstObject;
-            if ([firstItem isKindOfClass:[NSDictionary class]]) {
-                if (firstItem[@"pointName"] || firstItem[@"isFixed"] != nil) {
-                    return arr;
-                }
-            }
+        NSArray<NSDictionary *> *points = SWRunPointArrayFromArray((NSArray *)jsonObject);
+        if (points) return points;
+
+        for (id value in (NSArray *)jsonObject) {
+            NSArray<NSDictionary *> *nestedPoints = ExtractPointsFromJSON(value);
+            if (nestedPoints) return nestedPoints;
         }
     }
 
@@ -95,18 +165,31 @@ static SWRunCheckpoint *ParseCheckpoint(NSDictionary *pointDict) {
     SWRunCheckpoint *cp = [[SWRunCheckpoint alloc] init];
 
     cp.pointName = pointDict[@"pointName"] ?: @"未知点位";
-    cp.isFixed   = [pointDict[@"isFixed"] integerValue] == 1;
-    cp.isPassed  = [pointDict[@"isPass"] boolValue];
+    cp.isFixed   = SWRunBoolFromObject(SWRunValueForKeys(pointDict, @[@"isFixed", @"fixed"]));
+    cp.isPassed  = SWRunBoolFromObject(pointDict[@"isPass"]);
     cp.position  = [pointDict[@"position"] integerValue];
 
     // 坐标处理
-    id lonObj = pointDict[@"lon"] ?: pointDict[@"lng"];
-    id latObj = pointDict[@"lat"];
+    id lonObj = SWRunValueForKeys(pointDict, @[@"lon", @"lng", @"glon", @"gLng", @"longitude"]);
+    id latObj = SWRunValueForKeys(pointDict, @[@"lat", @"glat", @"gLat", @"latitude"]);
 
-    if ([lonObj isKindOfClass:[NSNumber class]]) cp.longitude = [lonObj doubleValue];
-    if ([latObj isKindOfClass:[NSNumber class]]) cp.latitude  = [latObj doubleValue];
+    cp.longitude = SWRunDoubleFromObject(lonObj);
+    cp.latitude  = SWRunDoubleFromObject(latObj);
 
     return cp;
+}
+
+static BOOL SWRunDataLooksPointRelated(NSData *data) {
+    if (!data || data.length < 10) return NO;
+    NSString *body = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (body.length == 0) return NO;
+
+    NSString *lower = [body lowercaseString];
+    return [lower containsString:@"pointsresmodels"] ||
+           [lower containsString:@"fivepointjson"] ||
+           ([lower containsString:@"isfixed"] &&
+            ([lower containsString:@"pointname"] ||
+             ([lower containsString:@"lat"] && [lower containsString:@"lon"])));
 }
 
 /// 检测是否跑步相关 URL
@@ -317,6 +400,13 @@ static int SWRunCopyCStringResult(const char *value, void *oldp, size_t *oldlenp
 
 static NSString *gLastRunningURL = nil;
 
+static BOOL SWRunShouldProcessResponse(NSData *data, NSString *requestURL, NSURLResponse *response) {
+    NSString *responseURL = response.URL.absoluteString;
+    return IsRunningRelatedURL(requestURL) ||
+           IsRunningRelatedURL(responseURL) ||
+           SWRunDataLooksPointRelated(data);
+}
+
 %hook NSURLSession
 
 // ★ %new 必须在引用它的 hook 方法之前定义
@@ -340,10 +430,12 @@ static NSString *gLastRunningURL = nil;
         for (NSDictionary *pt in pointsArray) {
             if ([pt isKindOfClass:[NSDictionary class]]) {
                 SWRunCheckpoint *cp = ParseCheckpoint(pt);
+                if (cp.position <= 0) cp.position = checkpoints.count + 1;
                 [checkpoints addObject:cp];
                 NSLog(@"[SWRunHUD]   %@", cp);
             }
         }
+        if (checkpoints.count == 0) return;
 
         double totalDistance = 0;
         if ([jsonObj isKindOfClass:[NSDictionary class]]) {
@@ -357,12 +449,14 @@ static NSString *gLastRunningURL = nil;
         [[SWRunFloatingView sharedInstance] updateCheckpoints:checkpoints
                                                 totalDistance:totalDistance];
 
-        [[SWRunRoutePlanner sharedInstance]
-            planOptimalRouteAsync:checkpoints
-                       completion:^(SWRunRoutePlan *plan) {
-            NSLog(@"[SWRunHUD] %@", [plan summaryString]);
-            [[SWRunFloatingView sharedInstance] updateRoutePlan:plan];
-        }];
+        if (checkpoints.count >= 2) {
+            [[SWRunRoutePlanner sharedInstance]
+                planOptimalRouteAsync:checkpoints
+                           completion:^(SWRunRoutePlan *plan) {
+                NSLog(@"[SWRunHUD] %@", [plan summaryString]);
+                [[SWRunFloatingView sharedInstance] updateRoutePlan:plan];
+            }];
+        }
 
     } @catch (NSException *exception) {
         NSLog(@"[SWRunHUD] ⚠️ 解析异常: %@", exception.reason);
@@ -378,7 +472,7 @@ static NSString *gLastRunningURL = nil;
     }
 
     void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
-        if (data && !error && IsRunningRelatedURL(response.URL.absoluteString)) {
+        if (data && !error && SWRunShouldProcessResponse(data, urlStr, response)) {
             [self swrun_processResponseData:data];
         }
         if (completionHandler) {
@@ -387,6 +481,25 @@ static NSString *gLastRunningURL = nil;
     };
 
     return %orig(request, wrappedHandler);
+}
+
+- (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url
+                        completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
+    NSString *urlStr = url.absoluteString;
+    if (IsRunningRelatedURL(urlStr)) {
+        gLastRunningURL = [urlStr copy];
+    }
+
+    void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (data && !error && SWRunShouldProcessResponse(data, urlStr, response)) {
+            [self swrun_processResponseData:data];
+        }
+        if (completionHandler) {
+            completionHandler(data, response, error);
+        }
+    };
+
+    return %orig(url, wrappedHandler);
 }
 
 %end
