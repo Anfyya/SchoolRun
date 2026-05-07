@@ -1569,6 +1569,34 @@ static NSArray<NSValue *> *SWRunBuildRouteControls(SWRunFloatingView *hud,
     return coords;
 }
 
+static NSArray<NSValue *> *SWRunImmediateRouteCoordinates(SWRunFloatingView *hud,
+                                                         NSArray<NSValue *> *fallback) {
+    if (!hud) return fallback ?: @[];
+
+    @try {
+        NSArray<NSValue *> *cachedRealRoute = [hud valueForKey:@"realRouteCoordinatesForMap"];
+        if ([cachedRealRoute isKindOfClass:[NSArray class]] && cachedRealRoute.count >= 2) {
+            NSLog(@"[SWRunHUD] 使用悬浮窗已缓存真实路线立即启动: %lu 个点",
+                  (unsigned long)cachedRealRoute.count);
+            return cachedRealRoute;
+        }
+    } @catch (NSException *e) {}
+
+    SEL routeMapSelector = NSSelectorFromString(@"routeCoordinatesForMap");
+    if ([hud respondsToSelector:routeMapSelector]) {
+        @try {
+            NSArray<NSValue *> *mapRoute = ((NSArray<NSValue *> *(*)(id, SEL))objc_msgSend)(hud, routeMapSelector);
+            if ([mapRoute isKindOfClass:[NSArray class]] && mapRoute.count >= 2) {
+                NSLog(@"[SWRunHUD] 使用悬浮窗当前路线立即启动: %lu 个点",
+                      (unsigned long)mapRoute.count);
+                return mapRoute;
+            }
+        } @catch (NSException *e) {}
+    }
+
+    return fallback ?: @[];
+}
+
 static NSString *SWRunCurrentTargetLabel(SWRunSimulator *sim) {
     if (sim.currentTargetIndex >= 0) {
         return [NSString stringWithFormat:@"P%ld", (long)(sim.currentTargetIndex + 1)];
@@ -1614,26 +1642,25 @@ void SWRunStartGPSSimulation(void) {
     gSimStarting = YES;
     gSimLocation = SWRunBuildStrongGPSLocation(realStartLocation) ?: realStartLocation;
     gSimActive = YES;
-    [hud updateSimulationStatus:@"正在获取真实步行路线..." location:realStartLocation];
+    [hud updateSimulationStatus:@"正在启动模拟..." location:realStartLocation];
     [hud setSimulationRunning:YES];
     SWRunDeliverLocationToDelegates(gSimLocation);
     SWRunDeliverHeadingToDelegates();
 
-    [[SWRunRouteRealPath sharedInstance] walkingRouteCoordinatesForCoordinates:routeControls
-                                                                    completion:^(NSArray<NSValue *> *routeCoordinates, SWPathSource routeSource) {
-        if (!gSimStarting) return;
-        gSimStarting = NO;
-        NSLog(@"[SWRunHUD] 🛤 真实路线坐标已准备: %lu 个点, 来源=%ld",
-              (unsigned long)routeCoordinates.count, (long)routeSource);
+    NSArray<NSValue *> *simRouteCoordinates = SWRunImmediateRouteCoordinates(hud, routeControls);
+    if (simRouteCoordinates.count < 2) {
+        NSLog(@"[SWRunHUD] ❌ 路线点不足, 无法模拟");
+        SWRunStopGPSSimulation();
+        [hud updateSimulationStatus:@"路线点不足，无法启动模拟" location:realStartLocation];
+        return;
+    }
 
-        NSArray<NSValue *> *simRouteCoordinates = routeCoordinates.count >= 2 ? routeCoordinates : routeControls;
-
-        [[SWRunSimulator sharedInstance]
-        startSimulationWithCheckpoints:[hud valueForKey:@"checkpoints"]
-                          visitOrder:plan.optimalOrder
-                        startLocation:gSimLocation ?: realStartLocation
-                     routeCoordinates:simRouteCoordinates
-                     onTick:^(CLLocation *loc, NSInteger step) {
+    [[SWRunSimulator sharedInstance]
+    startSimulationWithCheckpoints:[hud valueForKey:@"checkpoints"]
+                        visitOrder:plan.optimalOrder
+                      startLocation:gSimLocation ?: realStartLocation
+                   routeCoordinates:simRouteCoordinates
+                         onTick:^(CLLocation *loc, NSInteger step) {
         gSimLocation = SWRunBuildStrongGPSLocation(loc) ?: loc;
         gSimActive = YES;
 
@@ -1677,11 +1704,10 @@ void SWRunStartGPSSimulation(void) {
         NSLog(@"[SWRunHUD] %@", finished ? @"✅ GPS模拟完成" : @"❌ GPS模拟异常终止");
     }];
 
-        // 更新悬浮窗状态
-        if ([SWRunSimulator sharedInstance].state == SWSimulatorStateRunning) {
-            [hud setSimulationRunning:YES];
-        }
-    }];
+    gSimStarting = NO;
+    if ([SWRunSimulator sharedInstance].state == SWSimulatorStateRunning) {
+        [hud setSimulationRunning:YES];
+    }
 }
 
 /// 停止GPS模拟
