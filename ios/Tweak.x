@@ -13,6 +13,7 @@
 #import <CoreLocation/CoreLocation.h>
 #import <CoreMotion/CoreMotion.h>
 #import <MapKit/MapKit.h>
+#import <float.h>
 #import <math.h>
 #import <errno.h>
 #import <stdio.h>
@@ -1342,25 +1343,61 @@ static CLLocationSourceInformation *SWRunFakeLocationSourceInfo(void) {
     return nil;
 }
 
-static CLLocationAccuracy const kSWRunHorizontalAccuracy = 10.0;
-
 static BOOL SWRunCoordinateLooksUsable(CLLocationCoordinate2D coordinate) {
     if (!CLLocationCoordinate2DIsValid(coordinate)) return NO;
     return fabs(coordinate.latitude) > 0.000001 && fabs(coordinate.longitude) > 0.000001;
 }
 
-static CLLocation *SWRunBuildStrongGPSLocation(CLLocation *loc) {
-    if (!loc || !SWRunCoordinateLooksUsable(loc.coordinate)) return nil;
+static BOOL SWRunCoordinateOutOfChina(CLLocationCoordinate2D coord) {
+    return coord.longitude < 72.004 || coord.longitude > 137.8347 ||
+           coord.latitude < 0.8293 || coord.latitude > 55.8271;
+}
+
+static double SWRunTransformLat(double x, double y) {
+    double ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * sqrt(fabs(x));
+    ret += (20.0 * sin(6.0 * x * M_PI) + 20.0 * sin(2.0 * x * M_PI)) * 2.0 / 3.0;
+    ret += (20.0 * sin(y * M_PI) + 40.0 * sin(y / 3.0 * M_PI)) * 2.0 / 3.0;
+    ret += (160.0 * sin(y / 12.0 * M_PI) + 320.0 * sin(y * M_PI / 30.0)) * 2.0 / 3.0;
+    return ret;
+}
+
+static double SWRunTransformLng(double x, double y) {
+    double ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * sqrt(fabs(x));
+    ret += (20.0 * sin(6.0 * x * M_PI) + 20.0 * sin(2.0 * x * M_PI)) * 2.0 / 3.0;
+    ret += (20.0 * sin(x * M_PI) + 40.0 * sin(x / 3.0 * M_PI)) * 2.0 / 3.0;
+    ret += (150.0 * sin(x / 12.0 * M_PI) + 300.0 * sin(x / 30.0 * M_PI)) * 2.0 / 3.0;
+    return ret;
+}
+
+static CLLocationCoordinate2D SWRunWGS84ToGCJ02(CLLocationCoordinate2D coord) {
+    if (!SWRunCoordinateLooksUsable(coord) || SWRunCoordinateOutOfChina(coord)) return coord;
+
+    double a = 6378245.0;
+    double ee = 0.00669342162296594323;
+    double dLat = SWRunTransformLat(coord.longitude - 105.0, coord.latitude - 35.0);
+    double dLng = SWRunTransformLng(coord.longitude - 105.0, coord.latitude - 35.0);
+    double radLat = coord.latitude / 180.0 * M_PI;
+    double magic = sin(radLat);
+    magic = 1 - ee * magic * magic;
+    double sqrtMagic = sqrt(magic);
+    dLat = (dLat * 180.0) / ((a * (1 - ee)) / (magic * sqrtMagic) * M_PI);
+    dLng = (dLng * 180.0) / (a / sqrtMagic * cos(radLat) * M_PI);
+    return CLLocationCoordinate2DMake(coord.latitude + dLat, coord.longitude + dLng);
+}
+
+static CLLocation *SWRunLocationByReplacingCoordinate(CLLocation *loc, CLLocationCoordinate2D coordinate) {
+    if (!loc || !SWRunCoordinateLooksUsable(coordinate)) return nil;
 
     CLLocationDistance altitude = loc.verticalAccuracy >= 0 ? loc.altitude : 30.0;
+    CLLocationAccuracy horizontalAccuracy = loc.horizontalAccuracy;
     CLLocationDirection course = loc.course >= 0 ? loc.course : 0.0;
     CLLocationSpeed speed = loc.speed >= 0 ? loc.speed : 0.8;
     NSDate *timestamp = loc.timestamp ?: [NSDate date];
 
     if (@available(iOS 13.4, *)) {
-        return [[CLLocation alloc] initWithCoordinate:loc.coordinate
+        return [[CLLocation alloc] initWithCoordinate:coordinate
                                              altitude:altitude
-                                   horizontalAccuracy:kSWRunHorizontalAccuracy
+                                   horizontalAccuracy:horizontalAccuracy
                                      verticalAccuracy:3.0
                                                course:course
                                        courseAccuracy:3.0
@@ -1369,13 +1406,60 @@ static CLLocation *SWRunBuildStrongGPSLocation(CLLocation *loc) {
                                             timestamp:timestamp];
     }
 
-    return [[CLLocation alloc] initWithCoordinate:loc.coordinate
+    return [[CLLocation alloc] initWithCoordinate:coordinate
                                          altitude:altitude
-                               horizontalAccuracy:kSWRunHorizontalAccuracy
+                               horizontalAccuracy:horizontalAccuracy
                                  verticalAccuracy:3.0
                                            course:course
                                             speed:speed
                                         timestamp:timestamp];
+}
+
+static CLLocation *SWRunBuildStrongGPSLocation(CLLocation *loc) {
+    if (!loc || !SWRunCoordinateLooksUsable(loc.coordinate)) return nil;
+    return SWRunLocationByReplacingCoordinate(loc, loc.coordinate);
+}
+
+static double SWRunNearestCheckpointDistance(CLLocationCoordinate2D coordinate,
+                                             NSArray<SWRunCheckpoint *> *checkpoints) {
+    if (!SWRunCoordinateLooksUsable(coordinate) || checkpoints.count == 0) return DBL_MAX;
+
+    double best = DBL_MAX;
+    CLLocation *loc = [[CLLocation alloc] initWithLatitude:coordinate.latitude
+                                                 longitude:coordinate.longitude];
+    for (SWRunCheckpoint *cp in checkpoints) {
+        CLLocationCoordinate2D cpCoord = CLLocationCoordinate2DMake(cp.latitude, cp.longitude);
+        if (!SWRunCoordinateLooksUsable(cpCoord)) continue;
+        CLLocation *cpLoc = [[CLLocation alloc] initWithLatitude:cpCoord.latitude
+                                                       longitude:cpCoord.longitude];
+        best = MIN(best, [loc distanceFromLocation:cpLoc]);
+    }
+    return best;
+}
+
+static CLLocation *SWRunLocationAlignedToCheckpoints(CLLocation *loc,
+                                                     NSArray<SWRunCheckpoint *> *checkpoints) {
+    CLLocation *strongLoc = SWRunBuildStrongGPSLocation(loc);
+    if (!strongLoc || checkpoints.count == 0) return strongLoc;
+
+    CLLocationCoordinate2D raw = strongLoc.coordinate;
+    CLLocationCoordinate2D gcj = SWRunWGS84ToGCJ02(raw);
+    if (!SWRunCoordinateLooksUsable(gcj) ||
+        (fabs(raw.latitude - gcj.latitude) < 0.000001 &&
+         fabs(raw.longitude - gcj.longitude) < 0.000001)) {
+        return strongLoc;
+    }
+
+    double rawDistance = SWRunNearestCheckpointDistance(raw, checkpoints);
+    double gcjDistance = SWRunNearestCheckpointDistance(gcj, checkpoints);
+    if (isfinite(rawDistance) && isfinite(gcjDistance) && gcjDistance + 80.0 < rawDistance) {
+        NSLog(@"[SWRunHUD] 真实起点坐标已按点位坐标系对齐: raw %.6f, %.6f -> %.6f, %.6f (nearest %.0fm -> %.0fm)",
+              raw.latitude, raw.longitude, gcj.latitude, gcj.longitude,
+              rawDistance, gcjDistance);
+        return SWRunLocationByReplacingCoordinate(strongLoc, gcj);
+    }
+
+    return strongLoc;
 }
 
 static void SWRunRememberPreflightLocation(CLLocation *loc) {
@@ -1442,7 +1526,7 @@ static CLLocation *SWRunLocationFromProvider(id provider) {
     return best;
 }
 
-static CLLocation *SWRunCurrentRealStartLocation(void) {
+static CLLocation *SWRunCurrentRealStartLocation(NSArray<SWRunCheckpoint *> *checkpoints) {
     SWRunEnsureLocationContainers();
 
     CLLocation *amapBest = nil;
@@ -1475,7 +1559,7 @@ static CLLocation *SWRunCurrentRealStartLocation(void) {
               best.coordinate.longitude,
               SWRunLocationAge(best),
               best.horizontalAccuracy);
-        return strongLoc;
+        return SWRunLocationAlignedToCheckpoints(strongLoc, checkpoints);
     }
     return nil;
 }
@@ -1577,24 +1661,17 @@ static NSArray<NSValue *> *SWRunImmediateRouteCoordinates(SWRunFloatingView *hud
 
     @try {
         NSArray<NSValue *> *cachedRealRoute = [hud valueForKey:@"realRouteCoordinatesForMap"];
-        if ([cachedRealRoute isKindOfClass:[NSArray class]] && cachedRealRoute.count >= 2) {
+        NSNumber *sourceNumber = [hud valueForKey:@"realRoutePathSource"];
+        BOOL sourceIsRealPath = ![sourceNumber isKindOfClass:[NSNumber class]] ||
+                                [sourceNumber integerValue] != SWPathSourceStraightLine;
+        if (sourceIsRealPath &&
+            [cachedRealRoute isKindOfClass:[NSArray class]] &&
+            cachedRealRoute.count >= 2) {
             NSLog(@"[SWRunHUD] 使用悬浮窗已缓存真实路线立即启动: %lu 个点",
                   (unsigned long)cachedRealRoute.count);
             return cachedRealRoute;
         }
     } @catch (NSException *e) {}
-
-    SEL routeMapSelector = NSSelectorFromString(@"routeCoordinatesForMap");
-    if ([hud respondsToSelector:routeMapSelector]) {
-        @try {
-            NSArray<NSValue *> *mapRoute = ((NSArray<NSValue *> *(*)(id, SEL))objc_msgSend)(hud, routeMapSelector);
-            if ([mapRoute isKindOfClass:[NSArray class]] && mapRoute.count >= 2) {
-                NSLog(@"[SWRunHUD] 使用悬浮窗当前路线立即启动: %lu 个点",
-                      (unsigned long)mapRoute.count);
-                return mapRoute;
-            }
-        } @catch (NSException *e) {}
-    }
 
     return fallback ?: @[];
 }
@@ -1627,7 +1704,8 @@ void SWRunStartGPSSimulation(void) {
         return;
     }
 
-    CLLocation *realStartLocation = SWRunCurrentRealStartLocation();
+    NSArray<SWRunCheckpoint *> *checkpoints = [hud valueForKey:@"checkpoints"];
+    CLLocation *realStartLocation = SWRunCurrentRealStartLocation(checkpoints);
     if (realStartLocation) {
         [hud updateCurrentLocation:realStartLocation.coordinate.latitude
                                 lng:realStartLocation.coordinate.longitude];
@@ -1650,6 +1728,32 @@ void SWRunStartGPSSimulation(void) {
     SWRunDeliverHeadingToDelegates();
 
     NSArray<NSValue *> *simRouteCoordinates = SWRunImmediateRouteCoordinates(hud, routeControls);
+    if (simRouteCoordinates == routeControls && routeControls.count >= 2) {
+        [hud updateSimulationStatus:@"正在生成真实步行路线..." location:realStartLocation];
+        [[SWRunRouteRealPath sharedInstance] walkingRouteCoordinatesForCoordinates:routeControls
+                                                                        completion:^(NSArray<NSValue *> *routeCoordinates, SWPathSource source) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (!gSimActive || !gSimStarting) return;
+                if (source == SWPathSourceStraightLine || routeCoordinates.count < 2) {
+                    NSLog(@"[SWRunHUD] 真实步行路线未生成，拒绝使用直线模拟");
+                    SWRunStopGPSSimulation();
+                    [hud updateSimulationStatus:@"真实步行路线未生成，已停止，避免直线穿楼" location:realStartLocation];
+                    return;
+                }
+
+                @try {
+                    [hud setValue:routeCoordinates forKey:@"realRouteCoordinatesForMap"];
+                    [hud setValue:@(source) forKey:@"realRoutePathSource"];
+                } @catch (NSException *e) {}
+
+                gSimActive = NO;
+                gSimStarting = NO;
+                gSimLocation = nil;
+                SWRunStartGPSSimulation();
+            });
+        }];
+        return;
+    }
     if (simRouteCoordinates.count < 2) {
         NSLog(@"[SWRunHUD] ❌ 路线点不足, 无法模拟");
         SWRunStopGPSSimulation();
@@ -1658,7 +1762,7 @@ void SWRunStartGPSSimulation(void) {
     }
 
     [[SWRunSimulator sharedInstance]
-    startSimulationWithCheckpoints:[hud valueForKey:@"checkpoints"]
+    startSimulationWithCheckpoints:checkpoints
                         visitOrder:plan.optimalOrder
                       startLocation:gSimLocation ?: realStartLocation
                    routeCoordinates:simRouteCoordinates
@@ -1832,10 +1936,7 @@ void SWRunToggleSimulation(void) {
 }
 
 - (CLLocationAccuracy)horizontalAccuracy {
-    CLLocationAccuracy accuracy = %orig;
-    if (accuracy < 0) return accuracy;
-    if (gSimActive) return kSWRunHorizontalAccuracy;
-    return accuracy;
+    return %orig;
 }
 
 - (CLLocationAccuracy)verticalAccuracy {

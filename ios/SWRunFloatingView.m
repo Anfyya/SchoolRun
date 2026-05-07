@@ -139,6 +139,7 @@ static CLLocationCoordinate2D SWRunGCJ02ToWGS84(CLLocationCoordinate2D coord) {
 @property (nonatomic, strong) MKPolyline         *routePolyline;
 @property (nonatomic, strong) MKPointAnnotation  *currentLocationAnnotation;
 @property (nonatomic, copy)   NSArray<NSValue *> *realRouteCoordinatesForMap;
+@property (nonatomic, assign) SWPathSource       realRoutePathSource;
 @property (nonatomic, assign) CLLocationCoordinate2D currentDisplayCoordinate;
 @property (nonatomic, assign) CLLocationCoordinate2D routeStartCoordinate;
 @property (nonatomic, assign) BOOL                hasCurrentDisplayCoordinate;
@@ -170,6 +171,7 @@ static CLLocationCoordinate2D SWRunGCJ02ToWGS84(CLLocationCoordinate2D coord) {
         _isExpanded = NO;
         _checkpoints = @[];
         _totalDistance = 0;
+        _realRoutePathSource = SWPathSourceStraightLine;
         [self setupOverlayWindow];
         [self setupContainerView];
         [self setupHeader];
@@ -446,6 +448,7 @@ static CLLocationCoordinate2D SWRunGCJ02ToWGS84(CLLocationCoordinate2D coord) {
     NSArray<NSValue *> *controls = [self routeControlCoordinates];
     if (controls.count < 2) {
         self.realRouteCoordinatesForMap = nil;
+        self.realRoutePathSource = SWPathSourceStraightLine;
         self.routeMapLoading = NO;
         [self refreshRouteMap];
         return;
@@ -453,6 +456,7 @@ static CLLocationCoordinate2D SWRunGCJ02ToWGS84(CLLocationCoordinate2D coord) {
 
     NSUInteger requestID = ++self.routeMapRequestID;
     self.realRouteCoordinatesForMap = nil;
+    self.realRoutePathSource = SWPathSourceStraightLine;
     self.routeMapLoading = YES;
     [self refreshRouteMap];
 
@@ -463,6 +467,7 @@ static CLLocationCoordinate2D SWRunGCJ02ToWGS84(CLLocationCoordinate2D coord) {
             if (requestID != self.routeMapRequestID) return;
             self.routeMapLoading = NO;
             self.realRouteCoordinatesForMap = routeCoordinates.count >= 2 ? routeCoordinates : controls;
+            self.realRoutePathSource = source;
             [self refreshRouteMap];
         });
     }];
@@ -782,6 +787,7 @@ static CLLocationCoordinate2D SWRunGCJ02ToWGS84(CLLocationCoordinate2D coord) {
         self.checkpoints = checkpoints ?: @[];
         self.totalDistance = totalDistance;
         self.realRouteCoordinatesForMap = nil;
+        self.realRoutePathSource = SWPathSourceStraightLine;
         self.routeMapLoading = NO;
         self.routeMapRequestID++;
 
@@ -835,13 +841,13 @@ static CLLocationCoordinate2D SWRunGCJ02ToWGS84(CLLocationCoordinate2D coord) {
         self.currentDisplayCoordinate = coord;
         self.hasCurrentDisplayCoordinate = YES;
         if (self.currentLocationAnnotation) {
-            self.currentLocationAnnotation.coordinate = coord;
+            self.currentLocationAnnotation.coordinate = SWRunGCJ02ToWGS84(coord);
         }
 
         if (routeNeedsRefresh) {
             [self rebuildRealRouteMapPath];
         } else if (self.currentLocationAnnotation) {
-            MKMapPoint point = MKMapPointForCoordinate(coord);
+            MKMapPoint point = MKMapPointForCoordinate(SWRunGCJ02ToWGS84(coord));
             MKMapRect visible = self.routeMapView.visibleMapRect;
             if (!MKMapRectContainsPoint(visible, point)) {
                 [self refreshRouteMap];

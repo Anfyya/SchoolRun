@@ -31,9 +31,56 @@
 
 @end
 
+static BOOL SWRunRouteCoordinateOutOfChina(CLLocationCoordinate2D coord) {
+    return coord.longitude < 72.004 || coord.longitude > 137.8347 ||
+           coord.latitude < 0.8293 || coord.latitude > 55.8271;
+}
+
+static double SWRunRouteTransformLat(double x, double y) {
+    double ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * sqrt(fabs(x));
+    ret += (20.0 * sin(6.0 * x * M_PI) + 20.0 * sin(2.0 * x * M_PI)) * 2.0 / 3.0;
+    ret += (20.0 * sin(y * M_PI) + 40.0 * sin(y / 3.0 * M_PI)) * 2.0 / 3.0;
+    ret += (160.0 * sin(y / 12.0 * M_PI) + 320.0 * sin(y * M_PI / 30.0)) * 2.0 / 3.0;
+    return ret;
+}
+
+static double SWRunRouteTransformLng(double x, double y) {
+    double ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * sqrt(fabs(x));
+    ret += (20.0 * sin(6.0 * x * M_PI) + 20.0 * sin(2.0 * x * M_PI)) * 2.0 / 3.0;
+    ret += (20.0 * sin(x * M_PI) + 40.0 * sin(x / 3.0 * M_PI)) * 2.0 / 3.0;
+    ret += (150.0 * sin(x / 12.0 * M_PI) + 300.0 * sin(x / 30.0 * M_PI)) * 2.0 / 3.0;
+    return ret;
+}
+
+static CLLocationCoordinate2D SWRunRouteWGS84ToGCJ02(CLLocationCoordinate2D coord) {
+    if (!CLLocationCoordinate2DIsValid(coord) || SWRunRouteCoordinateOutOfChina(coord)) return coord;
+
+    double a = 6378245.0;
+    double ee = 0.00669342162296594323;
+    double dLat = SWRunRouteTransformLat(coord.longitude - 105.0, coord.latitude - 35.0);
+    double dLng = SWRunRouteTransformLng(coord.longitude - 105.0, coord.latitude - 35.0);
+    double radLat = coord.latitude / 180.0 * M_PI;
+    double magic = sin(radLat);
+    magic = 1 - ee * magic * magic;
+    double sqrtMagic = sqrt(magic);
+    dLat = (dLat * 180.0) / ((a * (1 - ee)) / (magic * sqrtMagic) * M_PI);
+    dLng = (dLng * 180.0) / (a / sqrtMagic * cos(radLat) * M_PI);
+    return CLLocationCoordinate2DMake(coord.latitude + dLat, coord.longitude + dLng);
+}
+
+static CLLocationCoordinate2D SWRunRouteGCJ02ToWGS84(CLLocationCoordinate2D coord) {
+    if (!CLLocationCoordinate2DIsValid(coord) || SWRunRouteCoordinateOutOfChina(coord)) return coord;
+
+    CLLocationCoordinate2D gcj = SWRunRouteWGS84ToGCJ02(coord);
+    return CLLocationCoordinate2DMake(coord.latitude * 2.0 - gcj.latitude,
+                                      coord.longitude * 2.0 - gcj.longitude);
+}
+
 // ============================================================
 #pragma mark - SWRunRouteRealPath 实现
 // ============================================================
+@class SWRunAMapRouteTask;
+
 @interface SWRunRouteRealPath ()
 
 /// 缓存: "lat1,lng1→lat2,lng2" → SWPathSegment
@@ -44,12 +91,69 @@
 @property (nonatomic, assign) Class amapWalkingRequestClass;
 /// 高德响应类
 @property (nonatomic, assign) Class amapWalkingResponseClass;
+@property (nonatomic, strong) NSMutableArray<SWRunAMapRouteTask *> *activeAMapTasks;
 
 - (void)appendWalkingRouteCoordinates:(NSArray<NSValue *> *)coordinates
                                 index:(NSInteger)index
                           routeCoords:(NSMutableArray<NSValue *> *)routeCoords
                            worstSource:(SWPathSource)worstSource
                             completion:(void(^)(NSArray<NSValue *> *routeCoordinates, SWPathSource overallSource))completion;
+- (void)retainAMapRouteTask:(SWRunAMapRouteTask *)task;
+- (void)releaseAMapRouteTask:(SWRunAMapRouteTask *)task;
+- (SWPathSegment *)parseAMapWalkingResponse:(id)response
+                                       from:(CLLocationCoordinate2D)from
+                                         to:(CLLocationCoordinate2D)to
+                           straightDistance:(double)straightDist;
+- (SWPathSegment *)straightLineFallbackFrom:(CLLocationCoordinate2D)from
+                                         to:(CLLocationCoordinate2D)to;
+
+@end
+
+@interface SWRunAMapRouteTask : NSObject
+@property (nonatomic, weak) SWRunRouteRealPath *owner;
+@property (nonatomic, strong) id searchAPI;
+@property (nonatomic, copy) void (^completion)(SWPathSegment *result);
+@property (nonatomic, assign) CLLocationCoordinate2D from;
+@property (nonatomic, assign) CLLocationCoordinate2D to;
+@property (nonatomic, assign) double straightDistance;
+@property (nonatomic, assign) BOOL finished;
+- (void)finishWithResponse:(id)response error:(NSError *)error;
+@end
+
+@implementation SWRunAMapRouteTask
+
+- (void)finishWithResponse:(id)response error:(NSError *)error {
+    if (self.finished) return;
+    self.finished = YES;
+
+    SWRunRouteRealPath *owner = self.owner;
+    SWPathSegment *seg = nil;
+    if (error || !response || !owner) {
+        seg = [owner straightLineFallbackFrom:self.from to:self.to];
+    } else {
+        seg = [owner parseAMapWalkingResponse:response
+                                         from:self.from
+                                           to:self.to
+                             straightDistance:self.straightDistance];
+    }
+
+    void (^completion)(SWPathSegment *) = self.completion;
+    self.completion = nil;
+    if (completion && seg) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(seg);
+        });
+    }
+    [owner releaseAMapRouteTask:self];
+}
+
+- (void)onRouteSearchDone:(id)request response:(id)response {
+    [self finishWithResponse:response error:nil];
+}
+
+- (void)AMapSearchRequest:(id)request didFailWithError:(NSError *)error {
+    [self finishWithResponse:nil error:error];
+}
 
 @end
 
@@ -72,11 +176,26 @@
     self = [super init];
     if (self) {
         _cache = [NSMutableDictionary dictionary];
+        _activeAMapTasks = [NSMutableArray array];
     }
     return self;
 }
 
 /// 运行时探测可用的地图服务
+- (void)retainAMapRouteTask:(SWRunAMapRouteTask *)task {
+    if (!task) return;
+    @synchronized (self.activeAMapTasks) {
+        [self.activeAMapTasks addObject:task];
+    }
+}
+
+- (void)releaseAMapRouteTask:(SWRunAMapRouteTask *)task {
+    if (!task) return;
+    @synchronized (self.activeAMapTasks) {
+        [self.activeAMapTasks removeObject:task];
+    }
+}
+
 - (void)detectMapServices {
     // 探测高德地图 SearchKit
     self.amapRouteSearchClass = NSClassFromString(@"AMapSearchAPI");
@@ -353,6 +472,38 @@
 
         // 设置代理回调
         // 方案: 用 block wrapper + associated object 实现回调
+        SEL searchSel = NSSelectorFromString(@"AMapWalkingRouteSearch:");
+        if (![searchAPI respondsToSelector:searchSel]) {
+            SWPathSegment *fallback = [self straightLineFallbackFrom:from to:to];
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(fallback); });
+            return;
+        }
+
+        SWRunAMapRouteTask *task = [[SWRunAMapRouteTask alloc] init];
+        task.owner = self;
+        task.searchAPI = searchAPI;
+        task.completion = completion;
+        task.from = from;
+        task.to = to;
+        task.straightDistance = straightDist;
+        [self retainAMapRouteTask:task];
+
+        SEL setDelegateSel = NSSelectorFromString(@"setDelegate:");
+        if ([searchAPI respondsToSelector:setDelegateSel]) {
+            ((void(*)(id, SEL, id))objc_msgSend)(searchAPI, setDelegateSel, task);
+        }
+
+        ((void(*)(id, SEL, id))objc_msgSend)(searchAPI, searchSel, request);
+
+        __weak SWRunAMapRouteTask *weakTask = task;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [weakTask finishWithResponse:nil error:[NSError errorWithDomain:@"SWRunRouteRealPath"
+                                                                       code:-1001
+                                                                   userInfo:nil]];
+        });
+
+#if 0
         __block BOOL callbackFired = NO;
         __weak typeof(self) weakSelf = self;
 
@@ -386,6 +537,7 @@
             SWPathSegment *fallback = [self straightLineFallbackFrom:from to:to];
             dispatch_async(dispatch_get_main_queue(), ^{ completion(fallback); });
         }
+#endif
 
     } @catch (NSException *exception) {
         NSLog(@"[SWRunHUD] ⚠️ 高德地图调用异常: %@", exception.reason);
@@ -481,8 +633,10 @@
     double straightDist = [SWRunRoutePlanner distanceFromLat:from.latitude lng:from.longitude
                                                        toLat:to.latitude lng:to.longitude];
 
-    MKPlacemark *fromPlace = [[MKPlacemark alloc] initWithCoordinate:from];
-    MKPlacemark *toPlace   = [[MKPlacemark alloc] initWithCoordinate:to];
+    CLLocationCoordinate2D appleFrom = SWRunRouteGCJ02ToWGS84(from);
+    CLLocationCoordinate2D appleTo = SWRunRouteGCJ02ToWGS84(to);
+    MKPlacemark *fromPlace = [[MKPlacemark alloc] initWithCoordinate:appleFrom];
+    MKPlacemark *toPlace   = [[MKPlacemark alloc] initWithCoordinate:appleTo];
 
     MKMapItem *fromItem = [[MKMapItem alloc] initWithPlacemark:fromPlace];
     MKMapItem *toItem   = [[MKMapItem alloc] initWithPlacemark:toPlace];
@@ -512,7 +666,13 @@
             seg.source = SWPathSourceAppleMaps;
             seg.isAvailable = YES;
             NSArray<NSValue *> *routeCoords = [self coordinatesFromPolyline:route.polyline];
-            seg.pathCoordinates = routeCoords.count >= 2 ? routeCoords : [self fallbackPathCoordinatesFrom:from to:to];
+            NSMutableArray<NSValue *> *appCoords = [NSMutableArray arrayWithCapacity:routeCoords.count];
+            for (NSValue *value in routeCoords) {
+                CLLocationCoordinate2D coord;
+                [value getValue:&coord];
+                [appCoords addObject:[NSValue valueWithMKCoordinate:SWRunRouteWGS84ToGCJ02(coord)]];
+            }
+            seg.pathCoordinates = appCoords.count >= 2 ? appCoords : [self fallbackPathCoordinatesFrom:from to:to];
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{ completion(seg); });
