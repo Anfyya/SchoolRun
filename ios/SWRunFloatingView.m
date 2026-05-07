@@ -13,6 +13,7 @@
 extern void SWRunStartGPSSimulation(void);
 extern void SWRunStopGPSSimulation(void);
 extern void SWRunToggleSimulation(void);
+extern void SWRunForceParseCheckpoints(void);
 
 // ============================================================
 #pragma mark - SWRunCheckpoint 实现
@@ -67,6 +68,7 @@ static CGFloat const kCornerRadius     = 12.0;
 @property (nonatomic, strong) UILabel            *routeInfoLabel;
 @property (nonatomic, strong) UILabel            *simStatusLabel;     // 模拟状态
 @property (nonatomic, strong) UIButton           *toggleBtn;
+@property (nonatomic, strong) UIButton           *parseBtn;          // 主动解析点位
 @property (nonatomic, strong) UIButton           *simBtn;            // ★ 模拟按钮
 @property (nonatomic, strong) UIButton           *simStopBtn;        // ★ 停止按钮
 @property (nonatomic, strong) UITableView        *tableView;
@@ -188,6 +190,16 @@ static CGFloat const kCornerRadius     = 12.0;
     [self.toggleBtn addTarget:self action:@selector(toggleExpand) forControlEvents:UIControlEventTouchUpInside];
     [headerView addSubview:self.toggleBtn];
 
+    // 主动解析点位按钮
+    self.parseBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.parseBtn setTitle:@"解析" forState:UIControlStateNormal];
+    [self.parseBtn setTitleColor:[UIColor colorWithRed:0.6 green:0.85 blue:1.0 alpha:1.0] forState:UIControlStateNormal];
+    self.parseBtn.titleLabel.font = [UIFont boldSystemFontOfSize:11];
+    self.parseBtn.backgroundColor = [[UIColor colorWithRed:0.2 green:0.55 blue:1.0 alpha:1.0] colorWithAlphaComponent:0.18];
+    self.parseBtn.layer.cornerRadius = 4;
+    [self.parseBtn addTarget:self action:@selector(onParseButtonTapped) forControlEvents:UIControlEventTouchUpInside];
+    [headerView addSubview:self.parseBtn];
+
     // ★ 模拟按钮
     self.simBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     [self.simBtn setTitle:@"▶️模拟" forState:UIControlStateNormal];
@@ -277,11 +289,12 @@ static CGFloat const kCornerRadius     = 12.0;
         self.toggleBtn.frame = CGRectMake(4, 4, 36, 36);
 
         // ★ 模拟按钮布局
+        self.parseBtn.frame = CGRectMake(kExpandedWidth - 162, 6, 42, 26);
         self.simBtn.frame = CGRectMake(kExpandedWidth - 75, 6, 65, 26);
         self.simStopBtn.frame = CGRectMake(kExpandedWidth - 116, 6, 36, 26);
 
-        self.titleLabel.frame = CGRectMake(40, 0, kExpandedWidth - 160, 26);
-        self.distanceLabel.frame = CGRectMake(40, 22, kExpandedWidth - 160, 20);
+        self.titleLabel.frame = CGRectMake(40, 0, kExpandedWidth - 205, 26);
+        self.distanceLabel.frame = CGRectMake(40, 22, kExpandedWidth - 205, 20);
 
         // Route Info (在 header 下方)
         if (routeInfoH > 0) {
@@ -322,6 +335,7 @@ static CGFloat const kCornerRadius     = 12.0;
 
         UIView *header = self.containerView.subviews.firstObject;
         header.frame = self.containerView.bounds;
+        self.parseBtn.hidden = YES;
         self.simBtn.hidden = YES;
         self.simStopBtn.hidden = YES;
         self.simStatusLabel.hidden = YES;
@@ -350,6 +364,7 @@ static CGFloat const kCornerRadius     = 12.0;
 - (void)expandAnimated:(BOOL)animated {
     self.isExpanded = YES;
     self.tableView.hidden = NO;
+    self.parseBtn.hidden = NO;
     self.simBtn.hidden = NO;
     self.simStopBtn.hidden = !self.isSimRunning;
     [self.toggleBtn setTitle:@"▲" forState:UIControlStateNormal];
@@ -647,6 +662,19 @@ static CGFloat const kCornerRadius     = 12.0;
         // 开始
         SWRunStartGPSSimulation();
     }
+}
+
+- (void)onParseButtonTapped {
+    [self.parseBtn setTitle:@"..." forState:UIControlStateNormal];
+    self.titleLabel.text = @"🔎 解析点位中";
+    SWRunForceParseCheckpoints();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                  dispatch_get_main_queue(), ^{
+        [self.parseBtn setTitle:@"解析" forState:UIControlStateNormal];
+        if (self.checkpoints.count == 0) {
+            self.titleLabel.text = @"未找到点位";
+        }
+    });
 }
 
 - (void)onSimStopTapped {

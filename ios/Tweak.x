@@ -61,6 +61,29 @@ static id SWRunValueForKeys(NSDictionary *dict, NSArray<NSString *> *keys) {
     return nil;
 }
 
+static id SWRunSafeValueForKey(id object, NSString *key) {
+    if (!object || key.length == 0 || object == [NSNull null]) return nil;
+    @try {
+        id value = [object valueForKey:key];
+        return value == [NSNull null] ? nil : value;
+    } @catch (NSException *e) {
+        return nil;
+    }
+}
+
+static id SWRunValueForKeysFromObject(id object, NSArray<NSString *> *keys) {
+    if (!object || object == [NSNull null]) return nil;
+    if ([object isKindOfClass:[NSDictionary class]]) {
+        return SWRunValueForKeys((NSDictionary *)object, keys);
+    }
+
+    for (NSString *key in keys) {
+        id value = SWRunSafeValueForKey(object, key);
+        if (value) return value;
+    }
+    return nil;
+}
+
 static double SWRunDoubleFromObject(id value) {
     if ([value isKindOfClass:[NSNumber class]]) return [value doubleValue];
     if ([value isKindOfClass:[NSString class]]) return [(NSString *)value doubleValue];
@@ -78,21 +101,42 @@ static BOOL SWRunBoolFromObject(id value) {
     return NO;
 }
 
-static BOOL SWRunDictionaryLooksLikeCheckpoint(NSDictionary *dict) {
-    if (![dict isKindOfClass:[NSDictionary class]]) return NO;
+static BOOL SWRunDictionaryLooksLikeCheckpoint(id dict) {
+    if (!dict || dict == [NSNull null]) return NO;
 
-    id latObj = SWRunValueForKeys(dict, @[@"lat", @"glat", @"gLat", @"latitude"]);
-    id lonObj = SWRunValueForKeys(dict, @[@"lon", @"lng", @"glon", @"gLng", @"longitude"]);
+    id latObj = SWRunValueForKeysFromObject(dict, @[@"lat", @"glat", @"gLat", @"latitude"]);
+    id lonObj = SWRunValueForKeysFromObject(dict, @[@"lon", @"lng", @"glon", @"gLng", @"longitude"]);
     if (!latObj || !lonObj) return NO;
 
     double lat = SWRunDoubleFromObject(latObj);
     double lon = SWRunDoubleFromObject(lonObj);
     if (fabs(lat) < 0.000001 || fabs(lon) < 0.000001) return NO;
 
-    return dict[@"isFixed"] != nil ||
-           dict[@"isPass"] != nil ||
-           dict[@"pointName"] != nil ||
-           dict[@"fixed"] != nil;
+    return SWRunValueForKeysFromObject(dict, @[@"isFixed", @"fixed"]) != nil ||
+           SWRunValueForKeysFromObject(dict, @[@"isPass", @"passed"]) != nil ||
+           SWRunValueForKeysFromObject(dict, @[@"pointName", @"name", @"title"]) != nil;
+}
+
+static NSDictionary *SWRunCheckpointDictionaryFromObject(id object) {
+    if (!SWRunDictionaryLooksLikeCheckpoint(object)) return nil;
+    if ([object isKindOfClass:[NSDictionary class]]) return object;
+
+    NSMutableDictionary *dict = [NSMutableDictionary dictionary];
+    id latObj = SWRunValueForKeysFromObject(object, @[@"lat", @"glat", @"gLat", @"latitude"]);
+    id lonObj = SWRunValueForKeysFromObject(object, @[@"lon", @"lng", @"glon", @"gLng", @"longitude"]);
+    id nameObj = SWRunValueForKeysFromObject(object, @[@"pointName", @"name", @"title"]);
+    id fixedObj = SWRunValueForKeysFromObject(object, @[@"isFixed", @"fixed"]);
+    id passObj = SWRunValueForKeysFromObject(object, @[@"isPass", @"passed"]);
+    id positionObj = SWRunValueForKeysFromObject(object, @[@"position", @"index", @"seq"]);
+
+    if (latObj) dict[@"lat"] = latObj;
+    if (lonObj) dict[@"lon"] = lonObj;
+    if (nameObj) dict[@"pointName"] = nameObj;
+    if (fixedObj) dict[@"isFixed"] = fixedObj;
+    if (passObj) dict[@"isPass"] = passObj;
+    if (positionObj) dict[@"position"] = positionObj;
+
+    return dict.count > 0 ? dict : nil;
 }
 
 static NSArray<NSDictionary *> *SWRunPointArrayFromArray(NSArray *array) {
@@ -100,9 +144,9 @@ static NSArray<NSDictionary *> *SWRunPointArrayFromArray(NSArray *array) {
 
     NSMutableArray<NSDictionary *> *points = [NSMutableArray array];
     for (id item in array) {
-        if ([item isKindOfClass:[NSDictionary class]] &&
-            SWRunDictionaryLooksLikeCheckpoint((NSDictionary *)item)) {
-            [points addObject:item];
+        NSDictionary *pointDict = SWRunCheckpointDictionaryFromObject(item);
+        if (pointDict) {
+            [points addObject:pointDict];
         }
     }
     return points.count > 0 ? points : nil;
@@ -399,6 +443,7 @@ static int SWRunCopyCStringResult(const char *value, void *oldp, size_t *oldlenp
 // ============================================================
 
 static NSString *gLastRunningURL = nil;
+static NSMutableArray<NSData *> *gPointCandidateResponses = nil;
 
 static BOOL SWRunShouldProcessResponse(NSData *data, NSString *requestURL, NSURLResponse *response) {
     NSString *responseURL = response.URL.absoluteString;
@@ -407,24 +452,28 @@ static BOOL SWRunShouldProcessResponse(NSData *data, NSString *requestURL, NSURL
            SWRunDataLooksPointRelated(data);
 }
 
-%hook NSURLSession
+static void SWRunRememberPointCandidateData(NSData *data) {
+    if (!SWRunDataLooksPointRelated(data)) return;
+    if (!gPointCandidateResponses) {
+        gPointCandidateResponses = [NSMutableArray array];
+    }
 
-// ★ %new 必须在引用它的 hook 方法之前定义
-%new
-- (void)swrun_processResponseData:(NSData *)data {
-    if (!data || data.length < 10) return;
+    [gPointCandidateResponses addObject:[data copy]];
+    while (gPointCandidateResponses.count > 8) {
+        [gPointCandidateResponses removeObjectAtIndex:0];
+    }
+}
+
+static BOOL SWRunProcessPointJSONObject(id jsonObj, NSString *source) {
+    if (!jsonObj) return NO;
 
     @try {
-        NSError *err = nil;
-        id jsonObj = [NSJSONSerialization JSONObjectWithData:data
-                                                     options:0
-                                                       error:&err];
-        if (err || !jsonObj) return;
-
         NSArray<NSDictionary *> *pointsArray = ExtractPointsFromJSON(jsonObj);
-        if (!pointsArray || pointsArray.count == 0) return;
+        if (!pointsArray || pointsArray.count == 0) return NO;
 
-        NSLog(@"[SWRunHUD] 🎯 检测到 %lu 个打卡点", (unsigned long)pointsArray.count);
+        NSLog(@"[SWRunHUD] 🎯 %@检测到 %lu 个打卡点",
+              source.length > 0 ? [NSString stringWithFormat:@"%@: ", source] : @"",
+              (unsigned long)pointsArray.count);
 
         NSMutableArray<SWRunCheckpoint *> *checkpoints = [NSMutableArray array];
         for (NSDictionary *pt in pointsArray) {
@@ -435,7 +484,7 @@ static BOOL SWRunShouldProcessResponse(NSData *data, NSString *requestURL, NSURL
                 NSLog(@"[SWRunHUD]   %@", cp);
             }
         }
-        if (checkpoints.count == 0) return;
+        if (checkpoints.count == 0) return NO;
 
         double totalDistance = 0;
         if ([jsonObj isKindOfClass:[NSDictionary class]]) {
@@ -457,10 +506,217 @@ static BOOL SWRunShouldProcessResponse(NSData *data, NSString *requestURL, NSURL
                 [[SWRunFloatingView sharedInstance] updateRoutePlan:plan];
             }];
         }
-
+        return YES;
     } @catch (NSException *exception) {
-        NSLog(@"[SWRunHUD] ⚠️ 解析异常: %@", exception.reason);
+        NSLog(@"[SWRunHUD] ⚠️ 点位解析异常: %@", exception.reason);
+        return NO;
     }
+}
+
+static BOOL SWRunProcessPointData(NSData *data, NSString *source) {
+    if (!data || data.length < 10) return NO;
+
+    NSError *err = nil;
+    id jsonObj = [NSJSONSerialization JSONObjectWithData:data
+                                                 options:0
+                                                   error:&err];
+    if (err || !jsonObj) return NO;
+    return SWRunProcessPointJSONObject(jsonObj, source);
+}
+
+static BOOL SWRunManualParseCachedResponses(void) {
+    NSArray<NSData *> *responses = [gPointCandidateResponses copy];
+    for (NSData *data in [responses reverseObjectEnumerator]) {
+        if (SWRunProcessPointData(data, @"缓存响应")) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static NSArray<NSString *> *SWRunObjectGraphCandidateKeys(void) {
+    return @[
+        @"pointsResModels", @"fivePointJson", @"fivePoints", @"fixed_point_json",
+        @"cachedScoringPoints", @"cachedRunAreas", @"scoringPolygons",
+        @"scoreRunPrepareImpl", @"freeRunPrepareImpl", @"outdoorRunPrepareImpl",
+        @"prepareImpl", @"pointDetector", @"downloader", @"geofenceConfig",
+        @"currentArea", @"currentModel", @"targetModel", @"runPolicy",
+        @"mapController", @"viewModel", @"dataSource", @"listDataSource",
+        @"model", @"data", @"listArray", @"dataArray", @"array",
+        @"scoreRunVC", @"freeRunVC", @"currentChildVC", @"selectedViewController",
+        @"rootViewController", @"presentedViewController", @"children"
+    ];
+}
+
+static BOOL SWRunIvarNameLooksRelevant(const char *ivarName) {
+    if (!ivarName) return NO;
+    return strstr(ivarName, "point") || strstr(ivarName, "Point") ||
+           strstr(ivarName, "run") || strstr(ivarName, "Run") ||
+           strstr(ivarName, "area") || strstr(ivarName, "Area") ||
+           strstr(ivarName, "model") || strstr(ivarName, "Model") ||
+           strstr(ivarName, "prepare") || strstr(ivarName, "Prepare") ||
+           strstr(ivarName, "controller") || strstr(ivarName, "Controller");
+}
+
+static NSArray<NSDictionary *> *SWRunExtractPointsFromObjectGraph(id object, NSInteger depth, NSMutableSet<NSString *> *visited) {
+    if (!object || object == [NSNull null] || depth < 0) return nil;
+
+    NSArray<NSDictionary *> *directPoints = ExtractPointsFromJSON(object);
+    if (directPoints) return directPoints;
+
+    if ([object isKindOfClass:[NSData class]]) {
+        NSError *err = nil;
+        id jsonObj = [NSJSONSerialization JSONObjectWithData:(NSData *)object options:0 error:&err];
+        return err ? nil : ExtractPointsFromJSON(jsonObj);
+    }
+
+    if ([object isKindOfClass:[NSString class]]) {
+        return ExtractPointsFromJSON(SWRunJSONFromString((NSString *)object));
+    }
+
+    if ([object isKindOfClass:[NSDictionary class]]) {
+        for (id value in [(NSDictionary *)object allValues]) {
+            NSArray<NSDictionary *> *points = SWRunExtractPointsFromObjectGraph(value, depth - 1, visited);
+            if (points) return points;
+        }
+        return nil;
+    }
+
+    if ([object isKindOfClass:[NSArray class]]) {
+        for (id value in (NSArray *)object) {
+            NSArray<NSDictionary *> *points = SWRunExtractPointsFromObjectGraph(value, depth - 1, visited);
+            if (points) return points;
+        }
+        return nil;
+    }
+
+    if (![object isKindOfClass:[NSObject class]]) return nil;
+
+    NSString *pointerKey = [NSString stringWithFormat:@"%p", object];
+    if ([visited containsObject:pointerKey]) return nil;
+    [visited addObject:pointerKey];
+
+    NSString *className = NSStringFromClass([object class]);
+    BOOL relevantObject = [className containsString:@"SW"] ||
+                          [className containsString:@"Sport"] ||
+                          [className containsString:@"Run"] ||
+                          [object isKindOfClass:[UIViewController class]] ||
+                          [object isKindOfClass:[UINavigationController class]] ||
+                          [object isKindOfClass:[UITabBarController class]] ||
+                          [object isKindOfClass:[UIWindow class]];
+    if (!relevantObject) return nil;
+
+    for (NSString *key in SWRunObjectGraphCandidateKeys()) {
+        id value = SWRunSafeValueForKey(object, key);
+        NSArray<NSDictionary *> *points = SWRunExtractPointsFromObjectGraph(value, depth - 1, visited);
+        if (points) return points;
+    }
+
+    unsigned int ivarCount = 0;
+    Ivar *ivars = class_copyIvarList([object class], &ivarCount);
+    for (unsigned int i = 0; i < ivarCount; i++) {
+        Ivar ivar = ivars[i];
+        const char *type = ivar_getTypeEncoding(ivar);
+        const char *name = ivar_getName(ivar);
+        if (!type || type[0] != '@' || !SWRunIvarNameLooksRelevant(name)) continue;
+
+        id value = nil;
+        @try {
+            value = object_getIvar(object, ivar);
+        } @catch (NSException *e) {
+            value = nil;
+        }
+
+        NSArray<NSDictionary *> *points = SWRunExtractPointsFromObjectGraph(value, depth - 1, visited);
+        if (points) {
+            free(ivars);
+            return points;
+        }
+    }
+    if (ivars) free(ivars);
+
+    return nil;
+}
+
+static void SWRunCollectViewControllerRoots(UIViewController *vc, NSMutableArray *roots) {
+    if (!vc || [roots containsObject:vc]) return;
+    [roots addObject:vc];
+
+    if (vc.presentedViewController) {
+        SWRunCollectViewControllerRoots(vc.presentedViewController, roots);
+    }
+    if ([vc isKindOfClass:[UINavigationController class]]) {
+        UINavigationController *nav = (UINavigationController *)vc;
+        for (UIViewController *child in nav.viewControllers) {
+            SWRunCollectViewControllerRoots(child, roots);
+        }
+    }
+    if ([vc isKindOfClass:[UITabBarController class]]) {
+        UITabBarController *tab = (UITabBarController *)vc;
+        for (UIViewController *child in tab.viewControllers) {
+            SWRunCollectViewControllerRoots(child, roots);
+        }
+    }
+    for (UIViewController *child in vc.children) {
+        SWRunCollectViewControllerRoots(child, roots);
+    }
+}
+
+static BOOL SWRunManualParseRuntimeObjects(void) {
+    NSMutableArray *roots = [NSMutableArray array];
+    UIApplication *app = UIApplication.sharedApplication;
+    if (app.delegate) [roots addObject:app.delegate];
+
+    NSMutableArray<UIWindow *> *windows = [NSMutableArray array];
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in app.connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                UIWindowScene *windowScene = (UIWindowScene *)scene;
+                [windows addObjectsFromArray:windowScene.windows];
+            }
+        }
+    } else {
+        NSArray *legacyWindows = SWRunSafeValueForKey(app, @"windows");
+        if ([legacyWindows isKindOfClass:[NSArray class]]) {
+            [windows addObjectsFromArray:legacyWindows];
+        }
+    }
+
+    for (UIWindow *window in windows) {
+        if (![roots containsObject:window]) [roots addObject:window];
+        SWRunCollectViewControllerRoots(window.rootViewController, roots);
+    }
+
+    for (id root in roots) {
+        NSMutableSet<NSString *> *visited = [NSMutableSet set];
+        NSArray<NSDictionary *> *points = SWRunExtractPointsFromObjectGraph(root, 5, visited);
+        if (points && SWRunProcessPointJSONObject(points, [NSString stringWithFormat:@"手动扫描 %@", NSStringFromClass([root class])])) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+void SWRunForceParseCheckpoints(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSLog(@"[SWRunHUD] 🔎 手动解析点位开始");
+        BOOL parsed = SWRunManualParseCachedResponses();
+        if (!parsed) {
+            parsed = SWRunManualParseRuntimeObjects();
+        }
+
+        if (!parsed) {
+            NSLog(@"[SWRunHUD] ❌ 手动解析点位失败: 缓存响应和当前页面对象图均未发现点位");
+        }
+    });
+}
+
+%hook NSURLSession
+
+// ★ %new 必须在引用它的 hook 方法之前定义
+%new
+- (void)swrun_processResponseData:(NSData *)data {
+    SWRunProcessPointData(data, @"网络响应");
 }
 
 // ★ 拦截 dataTaskWithRequest:completionHandler:
@@ -472,6 +728,9 @@ static BOOL SWRunShouldProcessResponse(NSData *data, NSString *requestURL, NSURL
     }
 
     void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (data && !error) {
+            SWRunRememberPointCandidateData(data);
+        }
         if (data && !error && SWRunShouldProcessResponse(data, urlStr, response)) {
             [self swrun_processResponseData:data];
         }
@@ -491,6 +750,9 @@ static BOOL SWRunShouldProcessResponse(NSData *data, NSString *requestURL, NSURL
     }
 
     void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (data && !error) {
+            SWRunRememberPointCandidateData(data);
+        }
         if (data && !error && SWRunShouldProcessResponse(data, urlStr, response)) {
             [self swrun_processResponseData:data];
         }
