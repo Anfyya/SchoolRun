@@ -1,13 +1,5 @@
 # === 禁止上传 App 程序 ===
-SWCampus.app/
-*.app/
-*.car
-*.nib
-*.storyboardc
-*.metallib
-*.bundle/
-Frameworks/
-PlugIns/
+# SWCampus.app/
 
 # Theos build artifacts
 ios/.theos/

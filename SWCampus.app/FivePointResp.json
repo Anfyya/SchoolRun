@@ -1,0 +1,48 @@
+{
+    "error":10000,
+    "message":"成功",
+    "data":{
+        "pointsResModels":[
+            {
+                "lon":120.204429,
+                "lat":30.214898,
+                "isFixed":0,
+                "pointName":"4号点"
+            },
+            {
+                "lon":120.207748,
+                "lat":30.214251,
+                "isFixed":0,
+                "pointName":"8号点"
+            },
+            {
+                "lon":120.204397,
+                "lat":30.21276,
+                "isFixed":1,
+                "pointName":"12号点"
+            },
+            {
+                "lon":120.205103,
+                "lat":30.214021,
+                "isFixed":0,
+                "pointName":"1号点"
+            },
+            {
+                "lon":120.205853,
+                "lat":30.21379,
+                "isFixed":0,
+                "pointName":"10号点"
+            }
+        ],
+        "prizeResModel":{
+            "prizeName":null,
+            "logoUrl":null,
+            "saveTime":0,
+            "get":false,
+            "open":false
+        },
+        "sportStartTime":1542336856498
+    }
+}
+
+
