@@ -693,10 +693,16 @@ static double  const kMinimumRouteDistance = 1100.0;
 
 - (void)showCollapsed {
     dispatch_async(dispatch_get_main_queue(), ^{
+        BOOL wasHidden = self.overlayWindow.hidden;
         self.overlayWindow.hidden = NO;
         self.containerView.alpha = 1.0;
         [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(autoCollapse) object:nil];
-        [self collapseAnimated:NO];
+
+        if (wasHidden && !self.isExpanded && !self.isSimRunning) {
+            [self collapseAnimated:NO];
+        } else {
+            [self setNeedsLayout];
+        }
     });
 }
 

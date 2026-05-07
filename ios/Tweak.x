@@ -2622,7 +2622,7 @@ static BOOL gHUDInitialized = NO;
                 NSLog(@"[SWRunHUD] 📱 运动世界 校园跑点位监控已激活");
                 NSLog(@"[SWRunHUD] 🔴 必经点(isFixed=1) 将显示为红色");
                 NSLog(@"[SWRunHUD] 🔵 普通点(isFixed=0) 将显示为蓝色");
-                NSLog(@"[SWRunHUD] 👆 点击悬浮球展开, 拖拽移动, 5秒自动收起");
+                NSLog(@"[SWRunHUD] 👆 点击悬浮球展开, 拖拽移动, 不再自动收起");
             });
         });
     }
