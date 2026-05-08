@@ -12,6 +12,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <dlfcn.h>
+#import <float.h>
 
 // ============================================================
 #pragma mark - SWPathSegment 实现
@@ -76,6 +77,49 @@ static CLLocationCoordinate2D SWRunRouteGCJ02ToWGS84(CLLocationCoordinate2D coor
                                       coord.longitude * 2.0 - gcj.longitude);
 }
 
+static double SWRunRouteDistanceBetween(CLLocationCoordinate2D a, CLLocationCoordinate2D b) {
+    if (!CLLocationCoordinate2DIsValid(a) || !CLLocationCoordinate2DIsValid(b)) return DBL_MAX;
+    CLLocation *la = [[CLLocation alloc] initWithLatitude:a.latitude longitude:a.longitude];
+    CLLocation *lb = [[CLLocation alloc] initWithLatitude:b.latitude longitude:b.longitude];
+    return [la distanceFromLocation:lb];
+}
+
+static double SWRunRouteMedianFromValues(NSArray<NSNumber *> *values) {
+    if (values.count == 0) return 0.0;
+
+    NSArray<NSNumber *> *sorted = [values sortedArrayUsingSelector:@selector(compare:)];
+    NSUInteger middle = sorted.count / 2;
+    if (sorted.count % 2 == 1) {
+        return sorted[middle].doubleValue;
+    }
+    return (sorted[middle - 1].doubleValue + sorted[middle].doubleValue) * 0.5;
+}
+
+static double SWRunRouteAverageNearestDistance(NSArray<NSValue *> *routeCoords,
+                                               NSArray<NSValue *> *controls) {
+    if (routeCoords.count == 0 || controls.count == 0) return DBL_MAX;
+
+    double total = 0.0;
+    NSInteger used = 0;
+    for (NSValue *controlValue in controls) {
+        CLLocationCoordinate2D control = [controlValue MKCoordinateValue];
+        if (!CLLocationCoordinate2DIsValid(control)) continue;
+
+        double best = DBL_MAX;
+        for (NSValue *routeValue in routeCoords) {
+            CLLocationCoordinate2D routeCoord = [routeValue MKCoordinateValue];
+            double distance = SWRunRouteDistanceBetween(control, routeCoord);
+            if (distance < best) best = distance;
+        }
+
+        if (best < DBL_MAX * 0.5) {
+            total += best;
+            used++;
+        }
+    }
+    return used > 0 ? total / used : DBL_MAX;
+}
+
 // ============================================================
 #pragma mark - SWRunRouteRealPath 实现
 // ============================================================
@@ -98,6 +142,9 @@ static CLLocationCoordinate2D SWRunRouteGCJ02ToWGS84(CLLocationCoordinate2D coor
                           routeCoords:(NSMutableArray<NSValue *> *)routeCoords
                            worstSource:(SWPathSource)worstSource
                             completion:(void(^)(NSArray<NSValue *> *routeCoordinates, SWPathSource overallSource))completion;
+- (NSArray<NSValue *> *)routeCoordinates:(NSArray<NSValue *> *)routeCoords
+                       alignedToControls:(NSArray<NSValue *> *)controls
+                                  source:(SWPathSource)source;
 - (void)retainAMapRouteTask:(SWRunAMapRouteTask *)task;
 - (void)releaseAMapRouteTask:(SWRunAMapRouteTask *)task;
 - (SWPathSegment *)parseAMapWalkingResponse:(id)response
@@ -378,6 +425,76 @@ static CLLocationCoordinate2D SWRunRouteGCJ02ToWGS84(CLLocationCoordinate2D coor
 // ============================================================
 #pragma mark - 核心: 计算两点间真实步行距离
 // ============================================================
+- (NSArray<NSValue *> *)routeCoordinates:(NSArray<NSValue *> *)routeCoords
+                       alignedToControls:(NSArray<NSValue *> *)controls
+                                  source:(SWPathSource)source {
+    if (source == SWPathSourceStraightLine || routeCoords.count < 2 || controls.count < 2) {
+        return routeCoords ?: @[];
+    }
+
+    NSMutableArray<NSNumber *> *latOffsets = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *lngOffsets = [NSMutableArray array];
+
+    for (NSValue *controlValue in controls) {
+        CLLocationCoordinate2D control = [controlValue MKCoordinateValue];
+        if (!CLLocationCoordinate2DIsValid(control)) continue;
+
+        double bestDistance = DBL_MAX;
+        CLLocationCoordinate2D bestRouteCoord = kCLLocationCoordinate2DInvalid;
+        for (NSValue *routeValue in routeCoords) {
+            CLLocationCoordinate2D routeCoord = [routeValue MKCoordinateValue];
+            double distance = SWRunRouteDistanceBetween(control, routeCoord);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestRouteCoord = routeCoord;
+            }
+        }
+
+        if (bestDistance < DBL_MAX * 0.5 && CLLocationCoordinate2DIsValid(bestRouteCoord)) {
+            [latOffsets addObject:@(control.latitude - bestRouteCoord.latitude)];
+            [lngOffsets addObject:@(control.longitude - bestRouteCoord.longitude)];
+        }
+    }
+
+    if (latOffsets.count < 2 || lngOffsets.count < 2) {
+        return routeCoords ?: @[];
+    }
+
+    double deltaLat = SWRunRouteMedianFromValues(latOffsets);
+    double deltaLng = SWRunRouteMedianFromValues(lngOffsets);
+
+    CLLocationCoordinate2D first = [routeCoords.firstObject MKCoordinateValue];
+    CLLocationCoordinate2D shiftedFirst = CLLocationCoordinate2DMake(first.latitude + deltaLat,
+                                                                     first.longitude + deltaLng);
+    double shiftMeters = SWRunRouteDistanceBetween(first, shiftedFirst);
+    if (shiftMeters < 8.0 || shiftMeters > 1800.0) {
+        return routeCoords ?: @[];
+    }
+
+    NSMutableArray<NSValue *> *shifted = [NSMutableArray arrayWithCapacity:routeCoords.count];
+    for (NSValue *value in routeCoords) {
+        CLLocationCoordinate2D coord = [value MKCoordinateValue];
+        CLLocationCoordinate2D moved = CLLocationCoordinate2DMake(coord.latitude + deltaLat,
+                                                                  coord.longitude + deltaLng);
+        if (CLLocationCoordinate2DIsValid(moved)) {
+            [shifted addObject:[NSValue valueWithMKCoordinate:moved]];
+        }
+    }
+    if (shifted.count < 2) {
+        return routeCoords ?: @[];
+    }
+
+    double before = SWRunRouteAverageNearestDistance(routeCoords, controls);
+    double after = SWRunRouteAverageNearestDistance(shifted, controls);
+    if (before > 25.0 && after < before * 0.65) {
+        NSLog(@"[SWRunHUD] 路线整体平移校准: %.0fm -> %.0fm, 平移 %.0fm",
+              before, after, shiftMeters);
+        return shifted;
+    }
+
+    return routeCoords ?: @[];
+}
+
 - (void)walkingDistanceFrom:(CLLocationCoordinate2D)from
                          to:(CLLocationCoordinate2D)to
                  completion:(void(^)(SWPathSegment *result))completion {
@@ -722,7 +839,10 @@ static CLLocationCoordinate2D SWRunRouteGCJ02ToWGS84(CLLocationCoordinate2D coor
                            worstSource:(SWPathSource)worstSource
                             completion:(void(^)(NSArray<NSValue *> *routeCoordinates, SWPathSource overallSource))completion {
     if (index >= coordinates.count - 1) {
-        completion(routeCoords, worstSource);
+        NSArray<NSValue *> *alignedRouteCoords = [self routeCoordinates:routeCoords
+                                                       alignedToControls:coordinates
+                                                                  source:worstSource];
+        completion(alignedRouteCoords, worstSource);
         return;
     }
 

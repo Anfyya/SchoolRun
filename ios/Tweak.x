@@ -1316,7 +1316,7 @@ void SWRunForceParseCheckpoints(void) {
 static BOOL        gSimActive        = NO;
 static BOOL        gSimStarting      = NO;
 static CLLocation *gSimLocation      = nil; // GCJ-02: 高德、点位和悬浮窗路线使用
-static CLLocation *gSimLocationWGS   = nil; // WGS-84: CoreLocation 消费方使用
+static CLLocation *gSimLocationWGS   = nil; // 兼容旧字段: CoreLocation 也使用校园跑内部坐标
 static CLLocation *gPreflightLocation = nil;
 /// 已注册的 CLLocationManager 实例 (弱引用)
 static NSHashTable *gLocationManagers = nil;
@@ -1386,14 +1386,6 @@ static CLLocationCoordinate2D SWRunWGS84ToGCJ02(CLLocationCoordinate2D coord) {
     return CLLocationCoordinate2DMake(coord.latitude + dLat, coord.longitude + dLng);
 }
 
-static CLLocationCoordinate2D SWRunGCJ02ToWGS84(CLLocationCoordinate2D coord) {
-    if (!SWRunCoordinateLooksUsable(coord) || SWRunCoordinateOutOfChina(coord)) return coord;
-
-    CLLocationCoordinate2D gcj = SWRunWGS84ToGCJ02(coord);
-    return CLLocationCoordinate2DMake(coord.latitude * 2.0 - gcj.latitude,
-                                      coord.longitude * 2.0 - gcj.longitude);
-}
-
 static CLLocation *SWRunLocationByReplacingCoordinate(CLLocation *loc, CLLocationCoordinate2D coordinate) {
     if (!loc || !SWRunCoordinateLooksUsable(coordinate)) return nil;
 
@@ -1429,11 +1421,6 @@ static CLLocation *SWRunBuildStrongGPSLocation(CLLocation *loc) {
     return SWRunLocationByReplacingCoordinate(loc, loc.coordinate);
 }
 
-static CLLocation *SWRunLocationWGSFromGCJLocation(CLLocation *loc) {
-    if (!loc || !SWRunCoordinateLooksUsable(loc.coordinate)) return nil;
-    return SWRunLocationByReplacingCoordinate(loc, SWRunGCJ02ToWGS84(loc.coordinate));
-}
-
 static void SWRunClearSimLocations(void) {
     gSimLocation = nil;
     gSimLocationWGS = nil;
@@ -1447,11 +1434,11 @@ static void SWRunSetSimLocationFromGCJLocation(CLLocation *loc) {
     }
 
     gSimLocation = gcjLoc;
-    gSimLocationWGS = SWRunLocationWGSFromGCJLocation(gcjLoc) ?: gcjLoc;
+    gSimLocationWGS = gcjLoc;
 }
 
 static CLLocation *SWRunSimLocationForCoreLocation(void) {
-    return gSimLocationWGS ?: gSimLocation;
+    return gSimLocation ?: gSimLocationWGS;
 }
 
 static CLLocation *SWRunSimLocationForAMap(void) {
@@ -1638,7 +1625,7 @@ static void SWRunDeliverLocationToDelegates(CLLocation *loc) {
     SWRunEnsureLocationContainers();
 
     CLLocation *baseLoc = SWRunBuildStrongGPSLocation(loc) ?: loc;
-    CLLocation *coreLoc = gSimActive ? (SWRunLocationWGSFromGCJLocation(baseLoc) ?: baseLoc) : baseLoc;
+    CLLocation *coreLoc = baseLoc;
     CLLocation *amapLoc = baseLoc;
 
     NSArray *locations = @[coreLoc];
