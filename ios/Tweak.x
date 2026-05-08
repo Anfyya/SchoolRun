@@ -1349,43 +1349,6 @@ static BOOL SWRunCoordinateLooksUsable(CLLocationCoordinate2D coordinate) {
     return fabs(coordinate.latitude) > 0.000001 && fabs(coordinate.longitude) > 0.000001;
 }
 
-static BOOL SWRunCoordinateOutOfChina(CLLocationCoordinate2D coord) {
-    return coord.longitude < 72.004 || coord.longitude > 137.8347 ||
-           coord.latitude < 0.8293 || coord.latitude > 55.8271;
-}
-
-static double SWRunTransformLat(double x, double y) {
-    double ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * sqrt(fabs(x));
-    ret += (20.0 * sin(6.0 * x * M_PI) + 20.0 * sin(2.0 * x * M_PI)) * 2.0 / 3.0;
-    ret += (20.0 * sin(y * M_PI) + 40.0 * sin(y / 3.0 * M_PI)) * 2.0 / 3.0;
-    ret += (160.0 * sin(y / 12.0 * M_PI) + 320.0 * sin(y * M_PI / 30.0)) * 2.0 / 3.0;
-    return ret;
-}
-
-static double SWRunTransformLng(double x, double y) {
-    double ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * sqrt(fabs(x));
-    ret += (20.0 * sin(6.0 * x * M_PI) + 20.0 * sin(2.0 * x * M_PI)) * 2.0 / 3.0;
-    ret += (20.0 * sin(x * M_PI) + 40.0 * sin(x / 3.0 * M_PI)) * 2.0 / 3.0;
-    ret += (150.0 * sin(x / 12.0 * M_PI) + 300.0 * sin(x / 30.0 * M_PI)) * 2.0 / 3.0;
-    return ret;
-}
-
-static CLLocationCoordinate2D SWRunWGS84ToGCJ02(CLLocationCoordinate2D coord) {
-    if (!SWRunCoordinateLooksUsable(coord) || SWRunCoordinateOutOfChina(coord)) return coord;
-
-    double a = 6378245.0;
-    double ee = 0.00669342162296594323;
-    double dLat = SWRunTransformLat(coord.longitude - 105.0, coord.latitude - 35.0);
-    double dLng = SWRunTransformLng(coord.longitude - 105.0, coord.latitude - 35.0);
-    double radLat = coord.latitude / 180.0 * M_PI;
-    double magic = sin(radLat);
-    magic = 1 - ee * magic * magic;
-    double sqrtMagic = sqrt(magic);
-    dLat = (dLat * 180.0) / ((a * (1 - ee)) / (magic * sqrtMagic) * M_PI);
-    dLng = (dLng * 180.0) / (a / sqrtMagic * cos(radLat) * M_PI);
-    return CLLocationCoordinate2DMake(coord.latitude + dLat, coord.longitude + dLng);
-}
-
 static CLLocation *SWRunLocationByReplacingCoordinate(CLLocation *loc, CLLocationCoordinate2D coordinate) {
     if (!loc || !SWRunCoordinateLooksUsable(coordinate)) return nil;
 
@@ -1445,46 +1408,10 @@ static CLLocation *SWRunSimLocationForAMap(void) {
     return gSimLocation;
 }
 
-static double SWRunNearestCheckpointDistance(CLLocationCoordinate2D coordinate,
-                                             NSArray<SWRunCheckpoint *> *checkpoints) {
-    if (!SWRunCoordinateLooksUsable(coordinate) || checkpoints.count == 0) return DBL_MAX;
-
-    double best = DBL_MAX;
-    CLLocation *loc = [[CLLocation alloc] initWithLatitude:coordinate.latitude
-                                                 longitude:coordinate.longitude];
-    for (SWRunCheckpoint *cp in checkpoints) {
-        CLLocationCoordinate2D cpCoord = CLLocationCoordinate2DMake(cp.latitude, cp.longitude);
-        if (!SWRunCoordinateLooksUsable(cpCoord)) continue;
-        CLLocation *cpLoc = [[CLLocation alloc] initWithLatitude:cpCoord.latitude
-                                                       longitude:cpCoord.longitude];
-        best = MIN(best, [loc distanceFromLocation:cpLoc]);
-    }
-    return best;
-}
-
 static CLLocation *SWRunLocationAlignedToCheckpoints(CLLocation *loc,
                                                      NSArray<SWRunCheckpoint *> *checkpoints) {
-    CLLocation *strongLoc = SWRunBuildStrongGPSLocation(loc);
-    if (!strongLoc || checkpoints.count == 0) return strongLoc;
-
-    CLLocationCoordinate2D raw = strongLoc.coordinate;
-    CLLocationCoordinate2D gcj = SWRunWGS84ToGCJ02(raw);
-    if (!SWRunCoordinateLooksUsable(gcj) ||
-        (fabs(raw.latitude - gcj.latitude) < 0.000001 &&
-         fabs(raw.longitude - gcj.longitude) < 0.000001)) {
-        return strongLoc;
-    }
-
-    double rawDistance = SWRunNearestCheckpointDistance(raw, checkpoints);
-    double gcjDistance = SWRunNearestCheckpointDistance(gcj, checkpoints);
-    if (isfinite(rawDistance) && isfinite(gcjDistance) && gcjDistance + 80.0 < rawDistance) {
-        NSLog(@"[SWRunHUD] 真实起点坐标已按点位坐标系对齐: raw %.6f, %.6f -> %.6f, %.6f (nearest %.0fm -> %.0fm)",
-              raw.latitude, raw.longitude, gcj.latitude, gcj.longitude,
-              rawDistance, gcjDistance);
-        return SWRunLocationByReplacingCoordinate(strongLoc, gcj);
-    }
-
-    return strongLoc;
+    (void)checkpoints;
+    return SWRunBuildStrongGPSLocation(loc);
 }
 
 static void SWRunRememberPreflightLocation(CLLocation *loc) {
