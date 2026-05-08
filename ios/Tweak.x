@@ -1315,7 +1315,8 @@ void SWRunForceParseCheckpoints(void) {
 /// 全局状态
 static BOOL        gSimActive        = NO;
 static BOOL        gSimStarting      = NO;
-static CLLocation *gSimLocation      = nil;
+static CLLocation *gSimLocation      = nil; // GCJ-02: 高德、点位和悬浮窗路线使用
+static CLLocation *gSimLocationWGS   = nil; // WGS-84: CoreLocation 消费方使用
 static CLLocation *gPreflightLocation = nil;
 /// 已注册的 CLLocationManager 实例 (弱引用)
 static NSHashTable *gLocationManagers = nil;
@@ -1385,6 +1386,14 @@ static CLLocationCoordinate2D SWRunWGS84ToGCJ02(CLLocationCoordinate2D coord) {
     return CLLocationCoordinate2DMake(coord.latitude + dLat, coord.longitude + dLng);
 }
 
+static CLLocationCoordinate2D SWRunGCJ02ToWGS84(CLLocationCoordinate2D coord) {
+    if (!SWRunCoordinateLooksUsable(coord) || SWRunCoordinateOutOfChina(coord)) return coord;
+
+    CLLocationCoordinate2D gcj = SWRunWGS84ToGCJ02(coord);
+    return CLLocationCoordinate2DMake(coord.latitude * 2.0 - gcj.latitude,
+                                      coord.longitude * 2.0 - gcj.longitude);
+}
+
 static CLLocation *SWRunLocationByReplacingCoordinate(CLLocation *loc, CLLocationCoordinate2D coordinate) {
     if (!loc || !SWRunCoordinateLooksUsable(coordinate)) return nil;
 
@@ -1418,6 +1427,35 @@ static CLLocation *SWRunLocationByReplacingCoordinate(CLLocation *loc, CLLocatio
 static CLLocation *SWRunBuildStrongGPSLocation(CLLocation *loc) {
     if (!loc || !SWRunCoordinateLooksUsable(loc.coordinate)) return nil;
     return SWRunLocationByReplacingCoordinate(loc, loc.coordinate);
+}
+
+static CLLocation *SWRunLocationWGSFromGCJLocation(CLLocation *loc) {
+    if (!loc || !SWRunCoordinateLooksUsable(loc.coordinate)) return nil;
+    return SWRunLocationByReplacingCoordinate(loc, SWRunGCJ02ToWGS84(loc.coordinate));
+}
+
+static void SWRunClearSimLocations(void) {
+    gSimLocation = nil;
+    gSimLocationWGS = nil;
+}
+
+static void SWRunSetSimLocationFromGCJLocation(CLLocation *loc) {
+    CLLocation *gcjLoc = SWRunBuildStrongGPSLocation(loc) ?: loc;
+    if (!gcjLoc || !SWRunCoordinateLooksUsable(gcjLoc.coordinate)) {
+        SWRunClearSimLocations();
+        return;
+    }
+
+    gSimLocation = gcjLoc;
+    gSimLocationWGS = SWRunLocationWGSFromGCJLocation(gcjLoc) ?: gcjLoc;
+}
+
+static CLLocation *SWRunSimLocationForCoreLocation(void) {
+    return gSimLocationWGS ?: gSimLocation;
+}
+
+static CLLocation *SWRunSimLocationForAMap(void) {
+    return gSimLocation;
 }
 
 static double SWRunNearestCheckpointDistance(CLLocationCoordinate2D coordinate,
@@ -1599,8 +1637,11 @@ static void SWRunDeliverLocationToDelegates(CLLocation *loc) {
     if (!loc) return;
     SWRunEnsureLocationContainers();
 
-    CLLocation *deliveredLoc = SWRunBuildStrongGPSLocation(loc) ?: loc;
-    NSArray *locations = @[deliveredLoc];
+    CLLocation *baseLoc = SWRunBuildStrongGPSLocation(loc) ?: loc;
+    CLLocation *coreLoc = gSimActive ? (SWRunLocationWGSFromGCJLocation(baseLoc) ?: baseLoc) : baseLoc;
+    CLLocation *amapLoc = baseLoc;
+
+    NSArray *locations = @[coreLoc];
     for (CLLocationManager *mgr in gLocationManagers) {
         id delegate = [gManagerDelegates objectForKey:mgr];
         if (delegate && [delegate respondsToSelector:@selector(locationManager:didUpdateLocations:)]) {
@@ -1612,7 +1653,7 @@ static void SWRunDeliverLocationToDelegates(CLLocation *loc) {
     for (id mgr in gAMapLocationManagers) {
         id delegate = [gAMapManagerDelegates objectForKey:mgr];
         if (delegate && [delegate respondsToSelector:amapUpdateSel]) {
-            ((void(*)(id, SEL, id, CLLocation *))objc_msgSend)(delegate, amapUpdateSel, mgr, deliveredLoc);
+            ((void(*)(id, SEL, id, CLLocation *))objc_msgSend)(delegate, amapUpdateSel, mgr, amapLoc);
         }
     }
 }
@@ -1719,21 +1760,16 @@ void SWRunStartGPSSimulation(void) {
     }
 
     NSArray<NSValue *> *routeControls = SWRunBuildRouteControls(hud, plan, realStartLocation);
-    gSimStarting = YES;
-    gSimLocation = SWRunBuildStrongGPSLocation(realStartLocation) ?: realStartLocation;
-    gSimActive = YES;
-    [hud updateSimulationStatus:@"正在启动模拟..." location:realStartLocation];
-    [hud setSimulationRunning:YES];
-    SWRunDeliverLocationToDelegates(gSimLocation);
-    SWRunDeliverHeadingToDelegates();
-
     NSArray<NSValue *> *simRouteCoordinates = SWRunImmediateRouteCoordinates(hud, routeControls);
     if (simRouteCoordinates == routeControls && routeControls.count >= 2) {
+        gSimStarting = YES;
+        gSimActive = NO;
+        SWRunClearSimLocations();
         [hud updateSimulationStatus:@"正在生成真实步行路线..." location:realStartLocation];
         [[SWRunRouteRealPath sharedInstance] walkingRouteCoordinatesForCoordinates:routeControls
                                                                         completion:^(NSArray<NSValue *> *routeCoordinates, SWPathSource source) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (!gSimActive || !gSimStarting) return;
+                if (!gSimStarting || gSimActive) return;
                 if (source == SWPathSourceStraightLine || routeCoordinates.count < 2) {
                     NSLog(@"[SWRunHUD] 真实步行路线未生成，拒绝使用直线模拟");
                     SWRunStopGPSSimulation();
@@ -1746,9 +1782,8 @@ void SWRunStartGPSSimulation(void) {
                     [hud setValue:@(source) forKey:@"realRoutePathSource"];
                 } @catch (NSException *e) {}
 
-                gSimActive = NO;
                 gSimStarting = NO;
-                gSimLocation = nil;
+                SWRunClearSimLocations();
                 SWRunStartGPSSimulation();
             });
         }];
@@ -1761,13 +1796,19 @@ void SWRunStartGPSSimulation(void) {
         return;
     }
 
+    gSimStarting = YES;
+    gSimActive = YES;
+    SWRunSetSimLocationFromGCJLocation(realStartLocation);
+    [hud updateSimulationStatus:@"正在启动模拟..." location:gSimLocation ?: realStartLocation];
+    [hud setSimulationRunning:YES];
+
     [[SWRunSimulator sharedInstance]
     startSimulationWithCheckpoints:checkpoints
                         visitOrder:plan.optimalOrder
                       startLocation:gSimLocation ?: realStartLocation
                    routeCoordinates:simRouteCoordinates
                          onTick:^(CLLocation *loc, NSInteger step) {
-        gSimLocation = SWRunBuildStrongGPSLocation(loc) ?: loc;
+        SWRunSetSimLocationFromGCJLocation(loc);
         gSimActive = YES;
 
         // ★ 更新悬浮窗状态标签
@@ -1805,7 +1846,7 @@ void SWRunStartGPSSimulation(void) {
     onComplete:^(BOOL finished) {
         gSimStarting = NO;
         gSimActive = NO;
-        gSimLocation = nil;
+        SWRunClearSimLocations();
         SWRunStopGPSSimulation();
         NSLog(@"[SWRunHUD] %@", finished ? @"✅ GPS模拟完成" : @"❌ GPS模拟异常终止");
     }];
@@ -1821,7 +1862,7 @@ void SWRunStopGPSSimulation(void) {
     [[SWRunSimulator sharedInstance] stop];
     gSimStarting = NO;
     gSimActive = NO;
-    gSimLocation = nil;
+    SWRunClearSimLocations();
     [[SWRunFloatingView sharedInstance] setSimulationRunning:NO];
 }
 
@@ -1867,7 +1908,7 @@ void SWRunToggleSimulation(void) {
 
 - (CLLocation *)location {
     if (gSimActive && gSimLocation) {
-        return gSimLocation;
+        return SWRunSimLocationForCoreLocation();
     }
 
     CLLocation *loc = %orig;
@@ -1997,6 +2038,7 @@ static CMPedometerData *gLastPedometerData = nil;
 
 static BOOL SWRunShouldSpoofMotionData(void) {
     if (!gSimActive) return NO;
+    if (gSimStarting) return YES;
     SWSimulatorState state = [SWRunSimulator sharedInstance].state;
     return state == SWSimulatorStateRunning || state == SWSimulatorStatePaused;
 }
@@ -2543,7 +2585,7 @@ static CMMotionActivity *gLastMotionActivity = nil;
                      completionBlock:(void (^)(CLLocation *location, id regeocode, NSError *error))completionBlock {
     if (gSimActive && gSimLocation && completionBlock) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            completionBlock(gSimLocation, nil, nil);
+            completionBlock(SWRunSimLocationForAMap(), nil, nil);
         });
         return;
     }
@@ -2572,14 +2614,14 @@ static CMMotionActivity *gLastMotionActivity = nil;
     id userLocation = %orig;
     if (gSimActive && gSimLocation && userLocation) {
         @try {
-            [userLocation setValue:gSimLocation forKey:@"location"];
+            [userLocation setValue:SWRunSimLocationForAMap() forKey:@"location"];
         } @catch (NSException *e) {}
     }
     return userLocation;
 }
 
 - (CLLocationCoordinate2D)centerCoordinate {
-    if (gSimActive && gSimLocation) return gSimLocation.coordinate;
+    if (gSimActive && gSimLocation) return [SWRunSimLocationForAMap() coordinate];
     return %orig;
 }
 
@@ -2589,7 +2631,7 @@ static CMMotionActivity *gLastMotionActivity = nil;
 %hook NSObject
 - (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations {
     if (gSimActive && gSimLocation) {
-        %orig(manager, @[gSimLocation]);
+        %orig(manager, @[SWRunSimLocationForCoreLocation()]);
         return;
     }
 
@@ -2609,7 +2651,8 @@ static CMMotionActivity *gLastMotionActivity = nil;
     didUpdateToLocation:(CLLocation *)newLocation
            fromLocation:(CLLocation *)oldLocation {
     if (gSimActive && gSimLocation) {
-        %orig(manager, gSimLocation, oldLocation ?: gSimLocation);
+        CLLocation *coreLoc = SWRunSimLocationForCoreLocation();
+        %orig(manager, coreLoc, oldLocation ?: coreLoc);
         return;
     }
 
@@ -2653,7 +2696,7 @@ monitoringDidFailForRegion:(CLRegion *)region
     if (gSimActive && gSimLocation) {
         @try {
             if ([bmkLocation respondsToSelector:@selector(location)]) {
-                [bmkLocation setValue:gSimLocation forKey:@"location"];
+                [bmkLocation setValue:SWRunSimLocationForCoreLocation() forKey:@"location"];
             }
         } @catch (NSException *e) {}
     }
@@ -2662,7 +2705,7 @@ monitoringDidFailForRegion:(CLRegion *)region
 
 - (void)amapLocationManager:(id)manager didUpdateLocation:(CLLocation *)location {
     if (gSimActive && gSimLocation) {
-        %orig(manager, gSimLocation);
+        %orig(manager, SWRunSimLocationForAMap());
         return;
     }
 
@@ -2677,7 +2720,7 @@ monitoringDidFailForRegion:(CLRegion *)region
 
 - (void)amapLocationManager:(id)manager didUpdateLocation:(CLLocation *)location reGeocode:(id)reGeocode {
     if (gSimActive && gSimLocation) {
-        %orig(manager, gSimLocation, reGeocode);
+        %orig(manager, SWRunSimLocationForAMap(), reGeocode);
         return;
     }
 
@@ -2700,7 +2743,7 @@ monitoringDidFailForRegion:(CLRegion *)region
 - (void)mapView:(id)mapView didUpdateUserLocation:(id)userLocation updatingLocation:(BOOL)updatingLocation {
     if (gSimActive && gSimLocation && userLocation) {
         @try {
-            [userLocation setValue:gSimLocation forKey:@"location"];
+            [userLocation setValue:SWRunSimLocationForAMap() forKey:@"location"];
         } @catch (NSException *e) {}
         %orig(mapView, userLocation, updatingLocation);
         return;
